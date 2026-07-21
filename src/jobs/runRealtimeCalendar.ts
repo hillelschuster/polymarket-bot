@@ -1,7 +1,7 @@
 import WebSocket from "ws";
 import type { OrderResponse } from "@polymarket/clob-client-v2";
 import { prisma } from "../lib/db.js";
-import { getActiveMarkets, getMarketBySlug, type GammaMarket } from "../adapters/polymarket.js";
+import { getActiveMarkets, getMarketBySlug, getOrderBook, type GammaMarket, type OrderBook } from "../adapters/polymarket.js";
 import { getFeeModel, type FeeModel } from "../adapters/marketFees.js";
 import { findCalendarPairs, outcomeToken } from "../lib/calendarArbitrage.js";
 import { quoteCalendarBasket, type CalendarBasketQuote } from "../lib/calendarExecution.js";
@@ -39,7 +39,7 @@ const MAX_PAGES = 20;
 const DISCOVERY_MS = 5 * 60_000;
 const RECONCILE_MS = 1_000;
 const RESOLUTION_MS = 60_000;
-const ATTEMPT_COOLDOWN_MS = 30_000;
+const ATTEMPT_COOLDOWN_MS = 2_000;
 const PENDING_MAX_AGE_MS = 5 * 60_000;
 
 interface LivePair {
@@ -201,12 +201,8 @@ function queueToken(tokenId: string): void {
   }
 }
 
-function booksAreFresh(early: RealtimeOrderBook, late: RealtimeOrderBook): boolean {
-  const now = Date.now();
-  return early.hasSnapshot && late.hasSnapshot &&
-    now - early.receivedAt <= config.LIVE_BOOK_MAX_AGE_MS &&
-    now - late.receivedAt <= config.LIVE_BOOK_MAX_AGE_MS &&
-    Math.abs(early.receivedAt - late.receivedAt) <= config.LIVE_BOOK_MAX_SKEW_MS;
+function booksReady(early: RealtimeOrderBook, late: RealtimeOrderBook): boolean {
+  return ws?.readyState === WebSocket.OPEN && early.hasSnapshot && late.hasSnapshot;
 }
 
 async function riskGate(quote: CalendarBasketQuote): Promise<string | null> {
@@ -253,15 +249,38 @@ function responseJson(response?: OrderResponse): string | null {
   return response ? JSON.stringify(response) : null;
 }
 
-async function executeOpportunity(pair: LivePair, quote: CalendarBasketQuote, earlyBook: RealtimeOrderBook, lateBook: RealtimeOrderBook): Promise<void> {
+async function executeOpportunity(pair: LivePair): Promise<void> {
   if (await activePairExists(pair.key)) return;
+
+  // WS finds the opportunity; fresh REST books are the final executable truth.
+  let earlyBook: OrderBook;
+  let lateBook: OrderBook;
+  try {
+    [earlyBook, lateBook] = await Promise.all([
+      getOrderBook(pair.earlyToken),
+      getOrderBook(pair.lateToken),
+    ]);
+  } catch {
+    return;
+  }
+  const quote = quoteCalendarBasket({
+    earlyBook,
+    lateBook,
+    earlyFee: pair.earlyFee,
+    lateFee: pair.lateFee,
+    basketCash: config.LIVE_CALENDAR_BASKET_USD,
+    maxCombinedCost: config.LIVE_CALENDAR_MAX_COMBINED_COST,
+    maxLegSpread: config.LIVE_CALENDAR_MAX_LEG_SPREAD,
+    minProfit: config.LIVE_CALENDAR_MIN_PROFIT_USD,
+  });
+  if (!quote) return;
   const gate = await riskGate(quote);
   if (gate) return;
 
   const submittedAt = Date.now();
   const row = await createLiveBasket({
     ...baseRecord(pair, quote),
-    attemptKey: `${pair.key}:live:${Math.floor(submittedAt / 10_000)}`,
+    attemptKey: `${pair.key}:live:${submittedAt}`,
     status: "submitting",
     submittedAt,
   });
@@ -272,16 +291,16 @@ async function executeOpportunity(pair: LivePair, quote: CalendarBasketQuote, ea
     shares: quote.shares,
     limitPrice: quote.earlyLimitPrice,
     estimatedCashCost: quote.early.cashCost,
-    tickSize: earlyBook.tickSize,
-    negRisk: earlyBook.negRisk,
+    tickSize: earlyBook.tick_size,
+    negRisk: earlyBook.neg_risk,
   };
   const lateLeg: ExactBuyLeg = {
     tokenId: pair.lateToken,
     shares: quote.shares,
     limitPrice: quote.lateLimitPrice,
     estimatedCashCost: quote.late.cashCost,
-    tickSize: lateBook.tickSize,
-    negRisk: lateBook.negRisk,
+    tickSize: lateBook.tick_size,
+    negRisk: lateBook.neg_risk,
   };
   const result = await executeFokBasket(earlyLeg, lateLeg);
   if (["unwind_failed", "manual_review"].includes(result.status)) halted = true;
@@ -306,7 +325,7 @@ async function evaluatePair(pairKey: string): Promise<void> {
   if (Date.now() - (lastAttemptAt.get(pairKey) ?? 0) < ATTEMPT_COOLDOWN_MS) return;
   const earlyBook = books.get(pair.earlyToken);
   const lateBook = books.get(pair.lateToken);
-  if (!earlyBook || !lateBook || !booksAreFresh(earlyBook, lateBook)) return;
+  if (!earlyBook || !lateBook || !booksReady(earlyBook, lateBook)) return;
 
   const quote = quoteCalendarBasket({
     earlyBook: earlyBook.toOrderBook(),
@@ -324,7 +343,7 @@ async function evaluatePair(pairKey: string): Promise<void> {
   lastAttemptAt.set(pairKey, Date.now());
   try {
     if (!realTradingEnabled || halted) await recordObservation(pair, quote);
-    else await executeOpportunity(pair, quote, earlyBook, lateBook);
+    else await executeOpportunity(pair);
   } finally {
     inFlight.delete(pairKey);
   }
