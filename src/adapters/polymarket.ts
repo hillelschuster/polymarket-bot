@@ -1,4 +1,4 @@
-// Base HTTP client for Polymarket public APIs. See SPEC §3,§5.
+// Public Polymarket market-data clients. No authentication or execution.
 export const DATA_API = "https://data-api.polymarket.com";
 export const GAMMA_API = "https://gamma-api.polymarket.com";
 export const CLOB_API = "https://clob.polymarket.com";
@@ -14,14 +14,11 @@ export async function fetchJson<T>(url: string, opts: RequestInit = {}, retries 
   if (process.env.POLYMARKET_API_KEY) headers["x-api-key"] = process.env.POLYMARKET_API_KEY;
   let attempt = 0;
   while (true) {
-    // ponytail: 10s abort so a slow/hanging upstream can't stall the whole pipeline.
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), 10_000);
     try {
       const res = await fetch(url, { ...opts, headers, signal: controller.signal });
       if (res.ok) return res.json() as Promise<T>;
-      // 429 (rate limit) and 5xx (server) are retryable with exponential backoff.
-      // This is the fix for the 429 storms that were silently corrupting enrichment.
       if ((res.status === 429 || res.status >= 500) && attempt < retries) {
         const retryAfter = Number(res.headers.get("retry-after") ?? 0);
         const wait = retryAfter > 0 ? retryAfter * 1000 : Math.min(2 ** attempt * 1000, 8000);
@@ -32,8 +29,7 @@ export async function fetchJson<T>(url: string, opts: RequestInit = {}, retries 
       }
       throw new FetchError(res.status, await res.text());
     } catch (e) {
-      if (e instanceof FetchError) throw e; // non-retryable status (or retries exhausted)
-      // network error / abort / timeout — retry if attempts remain
+      if (e instanceof FetchError) throw e;
       if (attempt < retries) {
         const wait = Math.min(2 ** attempt * 1000, 8000);
         console.warn(`fetchJson: network error on ${url} (attempt ${attempt + 1}/${retries}); retrying in ${wait}ms`);
@@ -56,7 +52,192 @@ export async function getPrices(tokenIds: string[]): Promise<{ token_id: string;
   return fetchJson<{ token_id: string; price: string }[]>(`${CLOB_API}/prices?${qs}`);
 }
 
-/** Gamma returns outcomes/outcomePrices as JSON strings; normalize to arrays. */
+export interface OrderLevel {
+  price: string;
+  size: string;
+}
+
+export interface OrderBook {
+  market: string;
+  asset_id: string;
+  timestamp?: string;
+  bids: OrderLevel[];
+  asks: OrderLevel[];
+  min_order_size?: string;
+  tick_size?: string;
+  neg_risk?: boolean;
+  last_trade_price?: string;
+}
+
+export interface BuyQuote {
+  shares: number;
+  cashCost: number;
+  averageAsk: number;
+  fee: number;
+  allInPrice: number;
+  bestBid: number | null;
+  bestAsk: number;
+  spread: number | null;
+}
+
+export interface SellQuote {
+  shares: number;
+  cashProceeds: number;
+  averageBid: number;
+  fee: number;
+  netPrice: number;
+  bestBid: number;
+  bestAsk: number | null;
+  spread: number | null;
+}
+
+export async function getOrderBook(tokenId: string): Promise<OrderBook> {
+  const qs = new URLSearchParams({ token_id: tokenId });
+  return fetchJson<OrderBook>(`${CLOB_API}/book?${qs}`);
+}
+
+export async function getFeeRateBps(tokenId: string): Promise<number> {
+  const raw = await fetchJson<{ base_fee: number | string }>(`${CLOB_API}/fee-rate/${encodeURIComponent(tokenId)}`);
+  const rate = Number(raw.base_fee);
+  if (!Number.isFinite(rate) || rate < 0) throw new Error(`Invalid fee rate for token ${tokenId}`);
+  return rate;
+}
+
+export function takerFeePerShare(price: number, feeRateBps: number): number {
+  return price * (1 - price) * (feeRateBps / 10_000);
+}
+
+function bookEdges(book: OrderBook): { bestBid: number | null; bestAsk: number | null; spread: number | null } {
+  const bids = (book.bids ?? []).map((x) => Number(x.price)).filter(Number.isFinite).sort((a, b) => b - a);
+  const asks = (book.asks ?? []).map((x) => Number(x.price)).filter(Number.isFinite).sort((a, b) => a - b);
+  const bestBid = bids[0] ?? null;
+  const bestAsk = asks[0] ?? null;
+  return { bestBid, bestAsk, spread: bestBid != null && bestAsk != null ? bestAsk - bestBid : null };
+}
+
+export function quoteBuyShares(book: OrderBook, feeRateBps: number, targetShares: number): BuyQuote | null {
+  if (!(targetShares > 0)) return null;
+  const asks = [...(book.asks ?? [])]
+    .map((x) => ({ price: Number(x.price), size: Number(x.size) }))
+    .filter((x) => Number.isFinite(x.price) && Number.isFinite(x.size) && x.price > 0 && x.size > 0)
+    .sort((a, b) => a.price - b.price);
+  if (!asks.length) return null;
+
+  let remaining = targetShares;
+  let notional = 0;
+  let fee = 0;
+  for (const level of asks) {
+    const take = Math.min(level.size, remaining);
+    notional += take * level.price;
+    fee += take * takerFeePerShare(level.price, feeRateBps);
+    remaining -= take;
+    if (remaining <= 1e-9) break;
+  }
+  if (remaining > 1e-6) return null;
+
+  const minOrder = Number(book.min_order_size ?? 0);
+  if (Number.isFinite(minOrder) && targetShares < minOrder) return null;
+  const edges = bookEdges(book);
+  if (edges.bestAsk == null) return null;
+  const cashCost = notional + fee;
+  return {
+    shares: targetShares,
+    cashCost,
+    averageAsk: notional / targetShares,
+    fee,
+    allInPrice: cashCost / targetShares,
+    bestBid: edges.bestBid,
+    bestAsk: edges.bestAsk,
+    spread: edges.spread,
+  };
+}
+
+export function quoteBuyCash(book: OrderBook, feeRateBps: number, cashBudget: number): BuyQuote | null {
+  if (!(cashBudget > 0)) return null;
+  const asks = [...(book.asks ?? [])]
+    .map((x) => ({ price: Number(x.price), size: Number(x.size) }))
+    .filter((x) => Number.isFinite(x.price) && Number.isFinite(x.size) && x.price > 0 && x.size > 0)
+    .sort((a, b) => a.price - b.price);
+  if (!asks.length) return null;
+
+  let remainingCash = cashBudget;
+  let shares = 0;
+  let notional = 0;
+  let fee = 0;
+  for (const level of asks) {
+    const feePerShare = takerFeePerShare(level.price, feeRateBps);
+    const allInPerShare = level.price + feePerShare;
+    const take = Math.min(level.size, remainingCash / allInPerShare);
+    shares += take;
+    notional += take * level.price;
+    fee += take * feePerShare;
+    remainingCash -= take * allInPerShare;
+    if (remainingCash <= 1e-7) break;
+  }
+  if (remainingCash > 0.005 || shares <= 0) return null;
+
+  const minOrder = Number(book.min_order_size ?? 0);
+  if (Number.isFinite(minOrder) && shares < minOrder) return null;
+  const edges = bookEdges(book);
+  if (edges.bestAsk == null) return null;
+  const cashCost = notional + fee;
+  return {
+    shares,
+    cashCost,
+    averageAsk: notional / shares,
+    fee,
+    allInPrice: cashCost / shares,
+    bestBid: edges.bestBid,
+    bestAsk: edges.bestAsk,
+    spread: edges.spread,
+  };
+}
+
+export function quoteSellShares(book: OrderBook, feeRateBps: number, targetShares: number): SellQuote | null {
+  if (!(targetShares > 0)) return null;
+  const bids = [...(book.bids ?? [])]
+    .map((x) => ({ price: Number(x.price), size: Number(x.size) }))
+    .filter((x) => Number.isFinite(x.price) && Number.isFinite(x.size) && x.price > 0 && x.size > 0)
+    .sort((a, b) => b.price - a.price);
+  if (!bids.length) return null;
+
+  let remaining = targetShares;
+  let notional = 0;
+  let fee = 0;
+  for (const level of bids) {
+    const take = Math.min(level.size, remaining);
+    notional += take * level.price;
+    fee += take * takerFeePerShare(level.price, feeRateBps);
+    remaining -= take;
+    if (remaining <= 1e-9) break;
+  }
+  if (remaining > 1e-6) return null;
+
+  const edges = bookEdges(book);
+  if (edges.bestBid == null) return null;
+  const cashProceeds = notional - fee;
+  return {
+    shares: targetShares,
+    cashProceeds,
+    averageBid: notional / targetShares,
+    fee,
+    netPrice: cashProceeds / targetShares,
+    bestBid: edges.bestBid,
+    bestAsk: edges.bestAsk,
+    spread: edges.spread,
+  };
+}
+
+export async function getExecutableBuyQuote(tokenId: string, cashBudget: number): Promise<BuyQuote | null> {
+  const [book, feeRateBps] = await Promise.all([getOrderBook(tokenId), getFeeRateBps(tokenId)]);
+  return quoteBuyCash(book, feeRateBps, cashBudget);
+}
+
+export async function getExecutableSellQuote(tokenId: string, shares: number): Promise<SellQuote | null> {
+  const [book, feeRateBps] = await Promise.all([getOrderBook(tokenId), getFeeRateBps(tokenId)]);
+  return quoteSellShares(book, feeRateBps, shares);
+}
+
 function parseList(v: unknown): string[] {
   if (Array.isArray(v)) return v.map((x) => String(x));
   if (typeof v === "string") {
@@ -65,44 +246,16 @@ function parseList(v: unknown): string[] {
   return [];
 }
 
-/** Get market metadata by slug from gamma-api. Slug is the reliable filter key
- *  (gamma's condition_id filter is broken and returns a default market). */
-export async function getMarketBySlug(slug: string): Promise<{
-  question: string | null;
-  category: string | null;
-  outcomes: string[];
-  outcomePrices: number[];
-  clobTokenIds: string[];
-  liquidity: number;
-  spread: number;
-  volume: number;
-  endDate: string | null;
-} | null> {
-  const qs = new URLSearchParams({ slug, limit: "1" });
-  const arr = await fetchJson<any[]>(`${GAMMA_API}/markets?${qs}`);
-  const m = Array.isArray(arr) ? arr[0] : null;
-  if (!m) return null;
-  return {
-    question: m.question ?? null,
-    category: m.category ?? null,
-    outcomes: parseList(m.outcomes),
-    outcomePrices: parseList(m.outcomePrices).map((x) => Number(x)),
-    clobTokenIds: parseList(m.clobTokenIds),
-    liquidity: Number(m.liquidityNum ?? 0),
-    spread: Number(m.spread ?? 0),
-    volume: Number(m.volumeNum ?? 0),
-    endDate: m.endDate ?? null,
-  };
-}
-
-// --- Market discovery (strategy scanners) ---
-
-/** Normalized market object from gamma-api /markets endpoint. */
 export interface GammaMarket {
   id: string;
+  conditionId: string | null;
   question: string | null;
   slug: string | null;
   category: string | null;
+  description: string | null;
+  resolutionSource: string | null;
+  eventId: string | null;
+  eventSlug: string | null;
   outcomes: string[];
   outcomePrices: number[];
   clobTokenIds: string[];
@@ -111,41 +264,85 @@ export interface GammaMarket {
   volume24hr: number;
   volume: number;
   endDate: string | null;
+  acceptingOrders: boolean;
   active: boolean;
   closed: boolean;
 }
 
-/** Tag object from gamma-api /tags endpoint. */
+function normalizeGammaMarket(m: any): GammaMarket {
+  const event = Array.isArray(m.events) ? m.events[0] : null;
+  return {
+    id: String(m.id ?? ""),
+    conditionId: m.conditionId ? String(m.conditionId) : null,
+    question: m.question ?? null,
+    slug: m.slug ?? null,
+    category: m.category ?? null,
+    description: m.description ?? null,
+    resolutionSource: m.resolutionSource ?? event?.resolutionSource ?? null,
+    eventId: event?.id != null ? String(event.id) : null,
+    eventSlug: event?.slug ?? null,
+    outcomes: parseList(m.outcomes),
+    outcomePrices: parseList(m.outcomePrices).map(Number),
+    clobTokenIds: parseList(m.clobTokenIds),
+    liquidity: Number(m.liquidityNum ?? m.liquidity ?? 0),
+    spread: Number(m.spread ?? 0),
+    volume24hr: Number(m.volume24hr ?? 0),
+    volume: Number(m.volumeNum ?? m.volume ?? 0),
+    endDate: m.endDate ?? null,
+    acceptingOrders: m.acceptingOrders !== false,
+    active: m.active !== false,
+    closed: m.closed === true,
+  };
+}
+
+export async function getMarketBySlug(slug: string): Promise<GammaMarket | null> {
+  const qs = new URLSearchParams({ slug, limit: "1" });
+  const arr = await fetchJson<any[]>(`${GAMMA_API}/markets?${qs}`);
+  const m = Array.isArray(arr) ? arr[0] : null;
+  return m ? normalizeGammaMarket(m) : null;
+}
+
+export interface ActiveMarketOpts {
+  limit?: number;
+  offset?: number;
+  liquidityMin?: number;
+  order?: string;
+  ascending?: boolean;
+}
+
+export async function getActiveMarkets(opts: ActiveMarketOpts = {}): Promise<GammaMarket[]> {
+  const qs = new URLSearchParams();
+  qs.set("active", "true");
+  qs.set("closed", "false");
+  qs.set("limit", String(opts.limit ?? 100));
+  qs.set("offset", String(opts.offset ?? 0));
+  qs.set("order", opts.order ?? "volume24hr");
+  qs.set("ascending", String(opts.ascending ?? false));
+  if (opts.liquidityMin != null) qs.set("liquidity_num_min", String(opts.liquidityMin));
+  const arr = await fetchJson<any[]>(`${GAMMA_API}/markets?${qs}`);
+  return Array.isArray(arr) ? arr.map(normalizeGammaMarket) : [];
+}
+
 export interface GammaTag {
   id: number;
   label: string;
   slug: string;
 }
 
-/** Fetch all available tags from gamma-api. Used to resolve category → tag_id. */
 export async function getTags(): Promise<GammaTag[]> {
   const arr = await fetchJson<any[]>(`${GAMMA_API}/tags`);
   if (!Array.isArray(arr)) return [];
-  return arr.map((t) => ({
-    id: Number(t.id),
-    label: String(t.label ?? ""),
-    slug: String(t.slug ?? ""),
-  }));
+  return arr.map((t) => ({ id: Number(t.id), label: String(t.label ?? ""), slug: String(t.slug ?? "") }));
 }
 
-export interface MarketsByTagOpts {
-  limit?: number;
-  offset?: number;
-  liquidityMin?: number;
-  endDateMin?: string; // ISO datetime
-  order?: string;
-  ascending?: boolean;
+export interface MarketsByTagOpts extends ActiveMarketOpts {
+  endDateMin?: string;
 }
 
-/** Fetch active markets filtered by tag_id from gamma-api. Paginated (max 100/page). */
 export async function getMarketsByTag(tagId: number, opts: MarketsByTagOpts = {}): Promise<GammaMarket[]> {
   const qs = new URLSearchParams();
   qs.set("tag_id", String(tagId));
+  qs.set("active", "true");
   qs.set("closed", "false");
   qs.set("limit", String(opts.limit ?? 100));
   qs.set("offset", String(opts.offset ?? 0));
@@ -153,23 +350,6 @@ export async function getMarketsByTag(tagId: number, opts: MarketsByTagOpts = {}
   qs.set("ascending", String(opts.ascending ?? false));
   if (opts.liquidityMin != null) qs.set("liquidity_num_min", String(opts.liquidityMin));
   if (opts.endDateMin) qs.set("end_date_min", opts.endDateMin);
-
   const arr = await fetchJson<any[]>(`${GAMMA_API}/markets?${qs}`);
-  if (!Array.isArray(arr)) return [];
-  return arr.map((m) => ({
-    id: String(m.id ?? ""),
-    question: m.question ?? null,
-    slug: m.slug ?? null,
-    category: m.category ?? null,
-    outcomes: parseList(m.outcomes),
-    outcomePrices: parseList(m.outcomePrices).map(Number),
-    clobTokenIds: parseList(m.clobTokenIds),
-    liquidity: Number(m.liquidityNum ?? 0),
-    spread: Number(m.spread ?? 0),
-    volume24hr: Number(m.volume24hr ?? 0),
-    volume: Number(m.volumeNum ?? 0),
-    endDate: m.endDate ?? null,
-    active: m.active !== false,
-    closed: m.closed === true,
-  }));
+  return Array.isArray(arr) ? arr.map(normalizeGammaMarket) : [];
 }
