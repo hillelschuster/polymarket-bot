@@ -42,11 +42,6 @@ export async function runPipeline(): Promise<PipelineResult> {
   let criticalFailure = false;
 
   for (const [name, fn, isCritical] of steps) {
-    if (criticalFailure && !isCritical) {
-      results.push({ name, success: false, error: "skipped (critical step failed)", critical: false });
-      console.log(`\n=== ${name} === SKIPPED (critical step failed)`);
-      continue;
-    }
     try {
       console.log(`\n=== ${name} ===`);
       await fn();
@@ -63,15 +58,12 @@ export async function runPipeline(): Promise<PipelineResult> {
   const failedNonCritical = results.filter((r) => !r.success && !r.critical).map((r) => r.name);
 
   console.log("\n========== PIPELINE SUMMARY ==========");
-  if (failedCritical.length) {
-    console.log(`CRITICAL FAILURES: ${failedCritical.join(", ")}`);
-    console.log("Run invalidated — downstream steps skipped to prevent stale data.");
-  }
+  if (failedCritical.length) console.log(`CRITICAL FAILURES: ${failedCritical.join(", ")}`);
   if (failedNonCritical.length) console.log(`Non-critical failures: ${failedNonCritical.join(", ")}`);
   if (!failedCritical.length && !failedNonCritical.length) console.log("All steps completed successfully.");
   console.log("=======================================\n");
 
-  return { success: failedCritical.length === 0, results, failedCritical, failedNonCritical };
+  return { success: !criticalFailure, results, failedCritical, failedNonCritical };
 }
 
 if (require.main === module) {
