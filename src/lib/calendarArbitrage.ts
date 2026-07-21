@@ -10,7 +10,6 @@ const MONTH = "(?:january|february|march|april|may|june|july|august|september|oc
 const DATE = `(?:${MONTH}\\s+\\d{1,2}(?:st|nd|rd|th)?(?:,?\\s+20\\d{2})?|${MONTH}\\s+20\\d{2}|20\\d{2}-\\d{1,2}-\\d{1,2}|\\d{1,2}\\/\\d{1,2}\\/20\\d{2}|(?:q[1-4]|first quarter|second quarter|third quarter|fourth quarter)\\s+20\\d{2}|(?:the\\s+)?end\\s+of\\s+${MONTH}(?:\\s+20\\d{2})?|(?:the\\s+)?end\\s+of\\s+20\\d{2})`;
 const DEADLINE_RE = new RegExp(`\\b(by|before|on or before|through|until)\\s+${DATE}`, "gi");
 
-/** Replace only deadline dates. "In 2026" is deliberately not treated as monotonic. */
 export function normalizeCalendarQuestion(text: string): string {
   return text
     .toLowerCase()
@@ -20,35 +19,33 @@ export function normalizeCalendarQuestion(text: string): string {
     .trim();
 }
 
-function isBinaryYesNo(m: GammaMarket): boolean {
-  if (m.outcomes.length !== 2 || m.clobTokenIds.length !== 2) return false;
-  const outcomes = m.outcomes.map((x) => x.toLowerCase());
+function binaryYesNo(market: GammaMarket): boolean {
+  if (market.outcomes.length !== 2 || market.clobTokenIds.length !== 2) return false;
+  const outcomes = market.outcomes.map((value) => value.toLowerCase());
   return outcomes.includes("yes") && outcomes.includes("no");
 }
 
+function normalizedSource(source: string): string {
+  return source.toLowerCase().replace(/\s+/g, " ").trim();
+}
+
 function sameResolutionTerms(a: GammaMarket, b: GammaMarket): boolean {
-  if (!a.resolutionSource || !b.resolutionSource) return false;
-  if (a.resolutionSource.trim() !== b.resolutionSource.trim()) return false;
-  if (a.eventId && b.eventId && a.eventId !== b.eventId) return false;
-  if (a.description && b.description) {
-    const ad = normalizeCalendarQuestion(a.description);
-    const bd = normalizeCalendarQuestion(b.description);
-    if (ad !== bd) return false;
-  }
-  return true;
+  if (!a.resolutionSource || !b.resolutionSource || !a.description || !b.description) return false;
+  if (normalizedSource(a.resolutionSource) !== normalizedSource(b.resolutionSource)) return false;
+  return normalizeCalendarQuestion(a.description) === normalizeCalendarQuestion(b.description);
 }
 
 export function findCalendarPairs(markets: GammaMarket[], now = Date.now()): CalendarPair[] {
   const groups = new Map<string, GammaMarket[]>();
-  for (const m of markets) {
-    if (!m.question || !m.endDate || !m.acceptingOrders || m.closed || !isBinaryYesNo(m)) continue;
-    const key = normalizeCalendarQuestion(m.question);
+  for (const market of markets) {
+    if (!market.question || !market.endDate || !market.acceptingOrders || market.closed || !binaryYesNo(market)) continue;
+    const key = normalizeCalendarQuestion(market.question);
     if (!key.includes("<deadline>")) continue;
-    const endMs = new Date(m.endDate).getTime();
+    const endMs = new Date(market.endDate).getTime();
     if (!Number.isFinite(endMs) || endMs <= now) continue;
-    const arr = groups.get(key) ?? [];
-    arr.push(m);
-    groups.set(key, arr);
+    const group = groups.get(key) ?? [];
+    group.push(market);
+    groups.set(key, group);
   }
 
   const pairs: CalendarPair[] = [];
@@ -69,6 +66,6 @@ export function findCalendarPairs(markets: GammaMarket[], now = Date.now()): Cal
 }
 
 export function outcomeToken(market: GammaMarket, outcome: "Yes" | "No"): string | null {
-  const idx = market.outcomes.findIndex((x) => x.toLowerCase() === outcome.toLowerCase());
-  return idx >= 0 ? market.clobTokenIds[idx] ?? null : null;
+  const index = market.outcomes.findIndex((value) => value.toLowerCase() === outcome.toLowerCase());
+  return index >= 0 ? market.clobTokenIds[index] ?? null : null;
 }
