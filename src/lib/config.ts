@@ -20,8 +20,6 @@ const envSchema = z.object({
   LIVE_CALENDAR_MAX_COMBINED_COST: z.coerce.number().positive().lt(1).default(0.975),
   LIVE_CALENDAR_MAX_LEG_SPREAD: z.coerce.number().positive().max(0.1).default(0.02),
   LIVE_CALENDAR_MIN_PROFIT_USD: z.coerce.number().nonnegative().default(0.10),
-  LIVE_BOOK_MAX_AGE_MS: z.coerce.number().int().positive().default(2_000),
-  LIVE_BOOK_MAX_SKEW_MS: z.coerce.number().int().positive().default(1_000),
   LIVE_MAX_TOTAL_EXPOSURE_USD: z.coerce.number().positive().default(100),
   LIVE_MAX_OPEN_BASKETS: z.coerce.number().int().positive().default(5),
   LIVE_MAX_DAILY_UNWIND_LOSS_USD: z.coerce.number().positive().default(10),
