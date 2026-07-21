@@ -50,19 +50,33 @@ export function createPaperTrade(signal: PaperSignal, confidence: number): Paper
 
 /**
  * Compute unrealized PnL.
- * BUY (YES) side: size * (currentPrice - entryPrice)
- * SELL / NO side: size * (entryPrice - currentPrice)
+ * Position size is in DOLLARS (cash invested), not shares.
+ * Shares purchased = cashInvested / entryPrice
+ * PnL = shares * (currentPrice - entryPrice) for long positions
+ *     = cashInvested * (currentPrice / entryPrice - 1)
+ * 
+ * For outcome-based trades (outcome="No"), we track the token price directly:
+ * - Buying NO at 0.40 means paying 0.40 per NO token
+ * - If NO resolves to 1.00, profit = (1.00 - 0.40) / 0.40 * cashInvested
  */
 export function unrealizedPnl(
   side: string,
   entryPrice: number,
   currentPrice: number,
-  size: number,
+  cashInvested: number,
 ): number {
-  if (side.toUpperCase() === "BUY" || side.toUpperCase() === "YES") {
-    return Math.round(size * (currentPrice - entryPrice) * 100) / 100;
+  if (entryPrice <= 0) return 0;
+  // shares = cashInvested / entryPrice
+  // PnL = shares * (currentPrice - entryPrice)
+  //     = (cashInvested / entryPrice) * (currentPrice - entryPrice)
+  //     = cashInvested * (currentPrice / entryPrice - 1)
+  const shares = cashInvested / entryPrice;
+  const sideUpper = side.toUpperCase();
+  if (sideUpper === "BUY" || sideUpper === "YES" || sideUpper === "LONG") {
+    return Math.round(shares * (currentPrice - entryPrice) * 100) / 100;
   }
-  return Math.round(size * (entryPrice - currentPrice) * 100) / 100;
+  // SELL/SHORT: profit when price falls
+  return Math.round(shares * (entryPrice - currentPrice) * 100) / 100;
 }
 
 /**

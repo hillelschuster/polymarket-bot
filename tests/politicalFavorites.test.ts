@@ -112,9 +112,10 @@ describe("scoreTrade with category-aware gate", () => {
 
 describe("political favorites scanner logic (unit)", () => {
   // Test the pure decision logic that the scanner uses
+  // IMPORTANT: These constants MUST match scanPoliticalFavorites.ts
 
   const GATE = 0.55; // politics gate
-  const MAX_PRICE = 0.80;
+  const MAX_PRICE = 0.85; // Production value (was 0.80)
 
   function isInSweetSpot(yesPrice: number, noPrice: number): { outcome: string; price: number } | null {
     if (yesPrice >= GATE && yesPrice <= MAX_PRICE) {
@@ -141,14 +142,14 @@ describe("political favorites scanner logic (unit)", () => {
     expect(result).toBeNull();
   });
 
-  it("rejects extreme favorites (above 0.80)", () => {
+  it("rejects extreme favorites (above 0.85)", () => {
     const result = isInSweetSpot(0.90, 0.10);
     expect(result).toBeNull();
   });
 
   it("accepts edge cases at exact gate boundaries", () => {
     expect(isInSweetSpot(0.55, 0.45)).toEqual({ outcome: "Yes", price: 0.55 });
-    expect(isInSweetSpot(0.80, 0.20)).toEqual({ outcome: "Yes", price: 0.80 });
+    expect(isInSweetSpot(0.85, 0.15)).toEqual({ outcome: "Yes", price: 0.85 });
   });
 
   it("edge estimate = favoritePrice * 0.15 (conservative calibration correction)", () => {
@@ -159,10 +160,11 @@ describe("political favorites scanner logic (unit)", () => {
 });
 
 describe("microstructure gates (unit)", () => {
-  const MIN_LIQUIDITY = 10_000;
-  const MAX_SPREAD = 0.05;
-  const MIN_DAYS = 3;
-  const MAX_DAYS = 60;
+  // IMPORTANT: These constants MUST match scanPoliticalFavorites.ts
+  const MIN_LIQUIDITY = 5_000;   // Production value (was 10_000)
+  const MAX_SPREAD = 0.08;       // Production value (was 0.05)
+  const MIN_DAYS = 1;            // Production value (was 3)
+  const MAX_DAYS = 90;           // Production value (was 60)
   const MAX_TOXIC = 15;
 
   function passesGates(m: {
@@ -183,19 +185,19 @@ describe("microstructure gates (unit)", () => {
   });
 
   it("rejects low liquidity", () => {
-    expect(passesGates({ liquidity: 5_000, spread: 0.02, daysToResolution: 15, volume24hr: 10_000 })).toBe(false);
+    expect(passesGates({ liquidity: 2_000, spread: 0.02, daysToResolution: 15, volume24hr: 10_000 })).toBe(false);
   });
 
   it("rejects wide spread", () => {
-    expect(passesGates({ liquidity: 50_000, spread: 0.08, daysToResolution: 15, volume24hr: 100_000 })).toBe(false);
+    expect(passesGates({ liquidity: 50_000, spread: 0.12, daysToResolution: 15, volume24hr: 100_000 })).toBe(false);
   });
 
-  it("rejects too-soon resolution", () => {
-    expect(passesGates({ liquidity: 50_000, spread: 0.02, daysToResolution: 1, volume24hr: 100_000 })).toBe(false);
+  it("rejects too-soon resolution (below 1 day)", () => {
+    expect(passesGates({ liquidity: 50_000, spread: 0.02, daysToResolution: 0.5, volume24hr: 10_000 })).toBe(false);
   });
 
-  it("rejects too-far resolution", () => {
-    expect(passesGates({ liquidity: 50_000, spread: 0.02, daysToResolution: 90, volume24hr: 100_000 })).toBe(false);
+  it("rejects too-far resolution (above 90 days)", () => {
+    expect(passesGates({ liquidity: 50_000, spread: 0.02, daysToResolution: 120, volume24hr: 10_000 })).toBe(false);
   });
 
   it("rejects toxic flow (volume/liquidity spike)", () => {
@@ -203,7 +205,7 @@ describe("microstructure gates (unit)", () => {
   });
 
   it("accepts boundary values", () => {
-    expect(passesGates({ liquidity: 10_000, spread: 0.05, daysToResolution: 3, volume24hr: 150_000 })).toBe(true);
-    expect(passesGates({ liquidity: 10_000, spread: 0.05, daysToResolution: 60, volume24hr: 150_000 })).toBe(true);
+    expect(passesGates({ liquidity: 5_000, spread: 0.08, daysToResolution: 1, volume24hr: 75_000 })).toBe(true);
+    expect(passesGates({ liquidity: 5_000, spread: 0.08, daysToResolution: 90, volume24hr: 75_000 })).toBe(true);
   });
 });

@@ -3,6 +3,15 @@
 // 13-18% underconfident. A 70¢ contract has ~83% true probability. Systematically
 // buying political favorites in the 55-80¢ range exploits this calibration error.
 //
+// IMPORTANT LIMITATIONS:
+// 1. The 13-18% underconfidence is an AVERAGE across all political markets.
+//    Actual edge varies by: category (elections vs policy), horizon, market type.
+// 2. We use a CONSERVATIVE edge estimate that decreases with price:
+//    - At 55¢: ~12% edge (high uncertainty, wider calibration range)
+//    - At 80¢: ~6% edge (near-certain, less room for underconfidence)
+// 3. This scanner targets ELECTORAL politics, not monetary policy (Fed rates).
+//    Fed markets have different dynamics and are excluded.
+//
 // This scanner is MARKET-STRUCTURAL — no wallet dependency. It runs as an independent
 // lane in the pipeline, creating paper trades via the existing PnL infrastructure.
 
@@ -19,28 +28,64 @@ const MAX_SPREAD = 0.08; // 8% max spread (widened for faster validation)
 const MIN_DAYS_TO_RESOLUTION = 1; // Skip markets resolving too soon
 const MAX_DAYS_TO_RESOLUTION = 90; // Skip markets too far out (variance, no info)
 const MAX_TOXIC_RATIO = 15; // volume24hr/liquidity cap
-const EDGE_MULTIPLIER = 0.15; // Conservative 15% calibration correction estimate
 const PAGE_SIZE = 100; // Gamma-api max per page
 const MAX_PAGES = 5; // Scan up to 500 markets per run
 
-// Political slug prefixes (from scoring.ts CATEGORY_PREFIXES + common patterns)
+/**
+ * Price-dependent edge multiplier. Research shows underconfidence varies by price:
+ * - Lower prices (55-65¢): higher uncertainty, wider calibration range → ~12% edge
+ * - Higher prices (75-85¢): near-certain outcomes, less underconfidence → ~6% edge
+ *
+ * Formula: edge = baseEdge * (1 - priceDecay * (price - minPrice))
+ * This is conservative compared to the raw 13-18% research average.
+ */
+const EDGE_BASE = 0.12; // 12% base edge at minimum price
+const EDGE_MIN_PRICE = 0.55; // Minimum favorite price
+const EDGE_DECAY = 0.5; // 50% decay from min to max price
+
+function computeEdgeEstimate(favoritePrice: number): number {
+  const priceRange = MAX_FAVORITE_PRICE - EDGE_MIN_PRICE;
+  const pricePosition = (favoritePrice - EDGE_MIN_PRICE) / priceRange; // 0..1
+  const decayFactor = 1 - EDGE_DECAY * pricePosition; // 1.0 at min, 0.5 at max
+  return EDGE_BASE * decayFactor;
+}
+
+// Political slug prefixes — ELECTORAL politics only.
+// EXCLUDED: "fed", "federal", "policy", "bill" — these match monetary policy
+// markets (Fed interest rates) which have different dynamics than elections.
 const POLITICAL_PREFIXES = new Set([
   "politics", "political", "election", "president", "presidential",
   "senate", "congress", "governor", "mayor", "referendum", "ballot",
   "trump", "biden", "democrat", "republican", "gop", "dnc", "rnc",
-  "fed", "federal", "government", "policy", "legislation", "bill",
   "supreme-court", "scotus", "impeach", "cabinet", "nominee",
+  "primary", "caucus", "incumbent", "challenger", "poll", "polls",
 ]);
 
-/** Check if a market is political based on slug, category, or question. */
+// Keywords that indicate NON-political markets (monetary policy, economics)
+const EXCLUSION_KEYWORDS = new Set([
+  "fed", "federal-reserve", "interest-rate", "rates", "fomc", "powell",
+  "inflation", "gdp", "unemployment", "treasury", "bond", "monetary",
+]);
+
+/** Check if a market is political based on slug, category, or question.
+ *  EXCLUDES monetary policy markets (Fed, interest rates) which have different dynamics. */
 function isPoliticalMarket(m: GammaMarket): boolean {
+  // First check for EXCLUSION keywords (monetary policy, economics)
+  const slugLower = m.slug?.toLowerCase() ?? "";
+  const questionLower = m.question?.toLowerCase() ?? "";
+
+  for (const keyword of EXCLUSION_KEYWORDS) {
+    if (slugLower.includes(keyword) || questionLower.includes(keyword)) {
+      return false; // Not electoral politics
+    }
+  }
+
   // Check slug prefix
   const slugCat = categoryFromSlug(m.slug);
   if (slugCat === "politics") return true;
 
   // Check category field
   if (m.category?.toLowerCase().includes("politic")) return true;
-  if (m.category?.toLowerCase().includes("government")) return true;
   if (m.category?.toLowerCase().includes("election")) return true;
 
   // Check slug keywords
@@ -49,11 +94,12 @@ function isPoliticalMarket(m: GammaMarket): boolean {
     if (tokens.some((t) => POLITICAL_PREFIXES.has(t))) return true;
   }
 
-  // Check question keywords (last resort)
+  // Check question keywords (last resort) — electoral politics only
   if (m.question) {
     const q = m.question.toLowerCase();
     if (q.includes("president") || q.includes("election") || q.includes("congress") ||
-        q.includes("senate") || q.includes("governor") || q.includes("political")) {
+        q.includes("senate") || q.includes("governor") || q.includes("political") ||
+        q.includes("primary") || q.includes("nominee")) {
       return true;
     }
   }
@@ -218,10 +264,9 @@ export async function runScanPoliticalFavorites(): Promise<ScanResult> {
       continue;
     }
 
-    // 3f. Compute edge estimate (conservative calibration correction)
-    // True probability ≈ favoritePrice * (1 + EDGE_MULTIPLIER)
-    // Edge = trueProb - favoritePrice = favoritePrice * EDGE_MULTIPLIER
-    const edgeEstimate = favoritePrice * EDGE_MULTIPLIER;
+    // 3f. Compute edge estimate (price-dependent, conservative calibration correction)
+    // Edge decreases with price: ~12% at 55¢, ~6% at 85¢
+    const edgeEstimate = computeEdgeEstimate(favoritePrice);
 
     // 3g. Create StrategySignal
     const reasons = [

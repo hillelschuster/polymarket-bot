@@ -33,22 +33,37 @@ describe("createPaperTrade", () => {
 });
 
 describe("unrealizedPnl", () => {
-  it("BUY side: size * (current - entry)", () => {
-    expect(unrealizedPnl("BUY", 0.5, 0.8, 100)).toBe(30);
-    expect(unrealizedPnl("BUY", 0.5, 0.3, 100)).toBe(-20);
+  // Position size is DOLLARS (cash invested), not shares.
+  // shares = cashInvested / entryPrice
+  // PnL = shares * (currentPrice - entryPrice)
+  //
+  // Example: $100 at $0.50 = 200 shares
+  // At $0.80: PnL = 200 * (0.80 - 0.50) = $60
+
+  it("BUY side: shares * (current - entry)", () => {
+    // $100 at $0.50 = 200 shares; at $0.80: 200 * 0.30 = $60
+    expect(unrealizedPnl("BUY", 0.5, 0.8, 100)).toBe(60);
+    // At $0.30: 200 * -0.20 = -$40
+    expect(unrealizedPnl("BUY", 0.5, 0.3, 100)).toBe(-40);
   });
 
   it("YES side: same as BUY", () => {
-    expect(unrealizedPnl("YES", 0.5, 0.8, 100)).toBe(30);
+    expect(unrealizedPnl("YES", 0.5, 0.8, 100)).toBe(60);
   });
 
-  it("SELL side: size * (entry - current)", () => {
-    expect(unrealizedPnl("SELL", 0.5, 0.3, 100)).toBe(20);
-    expect(unrealizedPnl("SELL", 0.5, 0.8, 100)).toBe(-30);
+  it("SELL side: shares * (entry - current)", () => {
+    // $100 at $0.50 = 200 shares; at $0.30: 200 * 0.20 = $40
+    expect(unrealizedPnl("SELL", 0.5, 0.3, 100)).toBe(40);
+    // At $0.80: 200 * -0.30 = -$60
+    expect(unrealizedPnl("SELL", 0.5, 0.8, 100)).toBe(-60);
   });
 
   it("NO side: same as SELL", () => {
-    expect(unrealizedPnl("NO", 0.5, 0.3, 100)).toBe(20);
+    expect(unrealizedPnl("NO", 0.5, 0.3, 100)).toBe(40);
+  });
+
+  it("handles zero entry price gracefully", () => {
+    expect(unrealizedPnl("BUY", 0, 0.5, 100)).toBe(0);
   });
 });
 

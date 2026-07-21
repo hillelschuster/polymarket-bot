@@ -22,7 +22,10 @@ export async function runReportDaily(): Promise<void> {
   const watched = journals.filter((j) => j.decision === "watchlist").length;
   const skipped = journals.filter((j) => j.decision === "skip").length;
 
-  // Benchmark: build from resolved trades
+  // Benchmark: bot-filtered trades vs blind-copy baseline.
+  // Bot trades = resolved PaperTrades (passed our filters).
+  // Blind baseline = ALL observed trades that we could have copied (no filtering).
+  // This gives a fair comparison: did our filtering add value vs random copying?
   const bmTrades: BenchmarkTrade[] = resolved.map((t) => ({
     id: t.id,
     strategy: "bot" as const,
@@ -30,8 +33,78 @@ export async function runReportDaily(): Promise<void> {
     marketId: t.marketId,
     walletAddress: t.walletAddress,
   }));
+
+  // Blind-copy baseline: simulate copying ALL observed trades from tracked wallets
+  // without any filtering. Uses the same PnL formula as bot trades for fair comparison.
+  // This answers: "Would we have done better/worse by copying everything?"
+  //
+  // Note: ObservedTrade doesn't have a direct relation to MarketSnapshot,
+  // so we query resolved snapshots first, then find observed trades for those markets.
+  const resolvedSnapshots = await prisma.marketSnapshot.findMany({
+    where: {
+      OR: [
+        { yesPrice: { gte: 0.995 } },
+        { yesPrice: { lte: 0.005 } },
+      ],
+    },
+    take: 200,
+  });
+
+  const resolvedMarketIds = new Set(resolvedSnapshots.map((s) => s.marketId));
+  const snapshotByMarket = new Map(resolvedSnapshots.map((s) => [s.marketId, s]));
+
+  const observedTrades = await prisma.observedTrade.findMany({
+    where: {
+      marketId: { in: [...resolvedMarketIds] },
+    },
+    take: 200,
+  });
+
+  for (const ot of observedTrades) {
+    // Skip if this trade was already copied by the bot (avoid double-counting)
+    const wasCopied = resolved.some((pt) => pt.marketId === ot.marketId);
+    if (wasCopied) continue;
+
+    // Calculate what PnL would have been if we blindly copied this trade
+    const snap = snapshotByMarket.get(ot.marketId);
+    if (!snap || snap.yesPrice == null) continue;
+
+    const entryPrice = ot.detectedPrice ?? ot.walletEntryPrice ?? 0.5;
+    const side = (ot.side ?? "BUY").toUpperCase();
+    const size = 10; // Standard $10 position for fair comparison
+
+    // Determine if this trade would have won
+    const yesFinal = snap.yesPrice;
+    const isResolved = yesFinal >= 0.995 || yesFinal <= 0.005;
+    if (!isResolved) continue;
+
+    // Calculate PnL using the same formula as paper.ts
+    const shares = size / entryPrice;
+    let pnl: number;
+    if (side === "BUY" || side === "YES") {
+      // BUY wins if YES resolves to 1
+      const won = yesFinal >= 0.995;
+      pnl = won ? shares * (1 - entryPrice) : shares * (0 - entryPrice);
+    } else {
+      // SELL/NO wins if YES resolves to 0
+      const won = yesFinal <= 0.005;
+      pnl = won ? shares * (entryPrice - 0) : shares * (entryPrice - 1);
+    }
+
+    bmTrades.push({
+      id: `blind-${ot.id}`,
+      strategy: "blind",
+      pnl: Math.round(pnl * 100) / 100,
+      marketId: ot.marketId,
+      walletAddress: ot.walletAddress,
+    });
+  }
+
   const benchmark = compareStrategies(bmTrades);
-  const beatBlindCopy = benchmark.botFiltered.netPnl >= benchmark.blindCopy.netPnl;
+  // BeatBlind is only meaningful when we have blind trades to compare against
+  const beatBlindCopy = benchmark.blindCopy.count > 0
+    ? benchmark.botFiltered.netPnl >= benchmark.blindCopy.netPnl
+    : null; // null = insufficient data for comparison
 
   const bestResolved = resolved.sort((a, b) => (b.realizedPnl ?? 0) - (a.realizedPnl ?? 0)).slice(0, 3);
   const worstResolved = resolved.sort((a, b) => (a.realizedPnl ?? 0) - (b.realizedPnl ?? 0)).slice(0, 3);
@@ -58,13 +131,13 @@ export async function runReportDaily(): Promise<void> {
       ruleChangesJson: JSON.stringify(ruleChanges.map((rc) => ({ id: rc.id, reason: rc.reason }))),
       winningPositions,
       unrealizedPnl: totalUnrealized,
-      summary: `PnL: $${totalPnl.toFixed(2)} | Unrealized: $${totalUnrealized.toFixed(2)} | WinRate: ${(winRate * 100).toFixed(1)}% | Open: ${openPositions} | Winning: ${winningPositions} | BeatBlind: ${beatBlindCopy}`,
+      summary: `PnL: $${totalPnl.toFixed(2)} | Unrealized: $${totalUnrealized.toFixed(2)} | WinRate: ${(winRate * 100).toFixed(1)}% | Open: ${openPositions} | Winning: ${winningPositions} | BeatBlind: ${beatBlindCopy === null ? 'N/A' : beatBlindCopy} | BlindTrades: ${benchmark.blindCopy.count}`,
     },
     update: {},
   });
 
   if (config.TELEGRAM_BOT_TOKEN && config.TELEGRAM_CHAT_ID) {
-    const msg = `<b>Daily Report</b>\nPnL: $${totalPnl.toFixed(2)}\nUnrealized: $${totalUnrealized.toFixed(2)}\nWinRate: ${(winRate * 100).toFixed(1)}%\nOpen: ${openPositions}\nWinning: ${winningPositions}\nCopied: ${copied}\nBeatBlind: ${beatBlindCopy}`;
+    const msg = `<b>Daily Report</b>\nPnL: $${totalPnl.toFixed(2)}\nUnrealized: $${totalUnrealized.toFixed(2)}\nWinRate: ${(winRate * 100).toFixed(1)}%\nOpen: ${openPositions}\nWinning: ${winningPositions}\nCopied: ${copied}\nBeatBlind: ${beatBlindCopy === null ? 'N/A (no blind data)' : beatBlindCopy}\nBlindTrades: ${benchmark.blindCopy.count}`;
     await sendMessage(msg);
     await prisma.dailyReport.update({ where: { id: report.id }, data: { sentToTelegram: true } });
   }

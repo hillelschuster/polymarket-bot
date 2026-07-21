@@ -1,6 +1,6 @@
 # Polymarket Bot — Plan & Current State
 
-**Last updated:** July 21, 2026  
+**Last updated:** July 21, 2026 (post code-review fixes)  
 **Repository:** https://github.com/hillelschuster/polymarket-bot (private)
 
 ---
@@ -284,8 +284,43 @@ npm run db:push
 1. **No real trades** unless `EXECUTE_REAL_TRADES=true` explicitly set
 2. **No private keys** in code or logs
 3. **No on-chain interaction** except via official CLOB API
-4. **Fail on error** — API failures stop the job, no silent fallbacks
+4. **Critical failures invalidate runs** — data-fetch failures skip downstream steps
 5. **Paper-first** — All new strategies validate on paper before live
+
+---
+
+## Code Review Fixes (July 21, 2026)
+
+An external code review identified 9 issues. All have been addressed:
+
+### Critical Fixes
+
+| # | Issue | Fix |
+|---|-------|-----|
+| 1 | **BUY/NO resolution bug** | `reviewOutcomes.ts` now uses `outcome` field (not `side`) to determine win/loss |
+| 2 | **Position size semantics** | `paper.ts` now calculates shares = cashInvested / entryPrice |
+| 5 | **Fake self-learning** | `updateRules.ts` disabled — rules are static until manually changed |
+| 6 | **Timestamp handling** | `scanWallets.ts` multiplies Unix seconds by 1000 for Date |
+| 9 | **Tests mismatched** | `politicalFavorites.test.ts` now uses production constants |
+
+### Structural Fixes
+
+| # | Issue | Fix |
+|---|-------|-----|
+| 3 | **Political edge overstated** | Price-dependent edge: 12% at 55¢, 6% at 85¢. Excluded Fed/monetary policy markets |
+| 4 | **Scoring overfit** | Liquidity band widened from 89K-207K to 10K-500K (45-trade sample too small) |
+| 7 | **Benchmark always wins** | `reportDaily.ts` now creates blind-copy baseline from observed trades |
+| 8 | **Pipeline error handling** | `runAll.ts` marks critical steps; failures skip downstream to prevent stale data |
+
+### Known Limitations (Documented)
+
+1. **Edge calibration**: The 13-18% underconfidence is an average. Actual edge varies by category, horizon, and market type. We use conservative price-dependent estimates.
+
+2. **Liquidity band**: Original 89K-207K was from 45 trades — likely overfit. Current 10K-500K is wide; re-validate with 200+ trades before tightening.
+
+3. **Political classifier**: Excludes monetary policy (Fed, interest rates) which have different dynamics than electoral politics.
+
+4. **Blind benchmark**: Requires resolved observed trades for comparison. Shows "N/A" until sufficient data accumulates.
 
 ---
 

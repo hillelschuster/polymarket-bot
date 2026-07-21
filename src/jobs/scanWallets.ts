@@ -125,7 +125,7 @@ export async function runScanWallets(): Promise<void> {
             catCount[cat] = (catCount[cat] || 0) + 1;
             if (won) catWins[cat] = (catWins[cat] || 0) + 1;
           }
-          const entered = new Date(t.timestamp).getTime();
+          const entered = new Date(t.timestamp * 1000).getTime(); // Unix seconds → ms
           entryTimings.push(Math.max(0, (end - entered) / 86_400_000));
         }
         const historicalWinRate = resolvedCount ? wins / resolvedCount : 0;

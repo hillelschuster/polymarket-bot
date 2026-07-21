@@ -82,6 +82,13 @@ export interface RuleSetValues {
 }
 
 // Default rule set values (sensible starting point, not in SPEC — derived from formulas)
+//
+// LIQUIDITY BAND WARNING: The minMarketLiquidity/maxMarketLiquidity values below
+// were derived from only 45 resolved trades. This is a SMALL SAMPLE and the band
+// may be overfit. We use WIDE bounds to avoid rejecting valid trades:
+// - minMarketLiquidity: $10K (floor to avoid truly illiquid markets)
+// - maxMarketLiquidity: $500K (ceiling to avoid HFT-dominated mega-markets)
+// These should be re-validated with 200+ resolved trades before tightening.
 export const DEFAULT_RULES: RuleSetValues = {
   minWalletGlobal: 35,              // floor: only copy from wallets with real quality signal
   minWalletCopyWinRate: 0.4,        // require 40%+ win rate on our copies before trusting a wallet
@@ -97,8 +104,8 @@ export const DEFAULT_RULES: RuleSetValues = {
   stopLossPct: 0.5,                 // close open paper trades when unrealized loss > 50% of size (cuts catastrophic bleed)
   // Market-variable equation (wallet-independent primary selector)
   minFavoritePrice: 0.60,           // only bet favorites (backtest sweep: 0.60 → 44% win +$7.81; [0.60,0.65) bucket profitable)
-  minMarketLiquidity: 89_000,       // skip illiquid tails (backtest: <89k loses)
-  maxMarketLiquidity: 207_000,      // skip extremes (backtest: >207k loses; mid-range 89-207k +$26)
+  minMarketLiquidity: 10_000,       // WIDENED from 89K: small sample (45 trades) may be overfit
+  maxMarketLiquidity: 500_000,      // WIDENED from 207K: avoid HFT-dominated mega-markets only
   liqTarget: 5_000,                 // liquidity ceiling for the liquidity score
   minDaysToResolution: 3,           // skip markets resolving <3d out (prices lock, no edge)
   sweetDaysToResolution: 30,        // beyond 30d the time score decays (variance, no info)
@@ -304,8 +311,10 @@ export function scoreTradeByMarket(
   if (entryGap > rules.maxEntryGap)
     return { score: 0, reasons: [...reasons, `entry gap ${entryGap.toFixed(3)} > ${rules.maxEntryGap}`], skip: true };
 
-  // Liquidity range gate: backtest on 45 resolved trades shows mid-range (89k–207k)
-  // produces 50% win +$26, while extremes (<89k and >207k) lose. Skip extremes.
+  // Liquidity range gate: WIDE bounds to avoid overfitting to small sample.
+  // Original 89K-207K band was from only 45 trades — likely overfit.
+  // Current bounds: $10K floor (avoid truly illiquid), $500K ceiling (avoid HFT-dominated).
+  // Re-validate with 200+ resolved trades before tightening.
   if (rules.minMarketLiquidity > 0 && f.liquidity < rules.minMarketLiquidity)
     return { score: 0, reasons: [...reasons, `liq ${f.liquidity} < min ${rules.minMarketLiquidity}`], skip: true };
   if (rules.maxMarketLiquidity > 0 && f.liquidity > rules.maxMarketLiquidity)

@@ -81,8 +81,13 @@ export async function runReviewOutcomes(): Promise<void> {
     const isResolved = yesFinal >= 1 - RESOLVED_EPS || yesFinal <= RESOLVED_EPS;
     if (!isResolved) continue;
     for (const pt of pts) {
-      // BUY (YES) wins if YES resolves to 1; SELL (NO) wins if YES resolves to 0.
-      const won = pt.side === "SELL" ? yesFinal <= RESOLVED_EPS : yesFinal >= 1 - RESOLVED_EPS;
+      // Determine win based on the OUTCOME TOKEN purchased, not side.
+      // outcome="Yes" → wins if YES resolves to 1 (yesFinal >= 0.995)
+      // outcome="No" → wins if NO resolves to 1 (yesFinal <= 0.005)
+      const outcomeToken = (pt.outcome ?? "Yes").toLowerCase();
+      const won = outcomeToken === "no" 
+        ? yesFinal <= RESOLVED_EPS   // NO token wins when YES → 0
+        : yesFinal >= 1 - RESOLVED_EPS; // YES token wins when YES → 1
       const updated = resolvePaperTrade(
         {
           walletAddress: pt.walletAddress,
