@@ -54,7 +54,8 @@ export async function runPaperUpdatePnl(): Promise<void> {
     const updated = hourlyPnl(trade, quote.netPrice);
     const lossFrac = updated.unrealizedPnl / cashInvested;
 
-    if (lossFrac < -rules.stopLossPct) {
+    const isCalendarBasket = pt.walletAddress.startsWith("STRATEGY:calendar_arb:");
+    if (!isCalendarBasket && lossFrac < -rules.stopLossPct) {
       const closed = closePaperTrade(trade, quote.netPrice);
       await prisma.paperTrade.update({
         where: { id: pt.id },
