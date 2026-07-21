@@ -21,7 +21,7 @@ const MIN_LIQUIDITY = 5_000;
 const MAX_LATE_DAYS = 14;
 const MIN_EARLY_HOURS = 6;
 const PAGE_SIZE = 100;
-const MAX_PAGES = 5;
+const MAX_PAGES = 20;
 
 export interface CalendarScanResult {
   markets: number;
