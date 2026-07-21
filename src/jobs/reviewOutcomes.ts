@@ -1,16 +1,17 @@
-// Job: review:outcomes. Refresh market state for open paper trades, resolve on resolution. SPEC §10.
+// Resolve paper trades only after Gamma marks the market officially closed.
 import { prisma } from "../lib/db.js";
 import { resolvePaperTrade } from "../lib/paper.js";
 import { getMarketBySlug } from "../adapters/polymarket.js";
 import { isLive } from "../lib/config.js";
 
-const RESOLVED_EPS = 0.005; // a binary outcome at ~0 or ~1 is resolved
+const RESOLVED_EPS = 0.005;
 
 export async function runReviewOutcomes(): Promise<void> {
   if (!isLive) {
     console.log("DEMO mode: skipping outcome review (seed provides reviews)");
     return;
   }
+
   const open = await prisma.paperTrade.findMany({
     where: { status: "open" },
     include: { decisionJournal: { include: { observedTrade: true } } },
@@ -19,80 +20,59 @@ export async function runReviewOutcomes(): Promise<void> {
     console.log("reviewOutcomes: no open paper trades");
     return;
   }
-  // Dedupe by slug so we hit the API once per market, not per trade.
+
   const bySlug = new Map<string, typeof open>();
   for (const pt of open) {
-    const slug = pt.slug;
-    if (!slug) continue;
-    const arr = bySlug.get(slug) ?? [];
+    if (!pt.slug) continue;
+    const arr = bySlug.get(pt.slug) ?? [];
     arr.push(pt);
-    bySlug.set(slug, arr);
+    bySlug.set(pt.slug, arr);
   }
+
   let resolved = 0;
-  for (const [slug, pts] of bySlug) {
-    // Prefer a stored terminal snapshot (reliable; live gamma fetch is rate-limited
-    // and often returns null). Fall back to a live fetch only if no snapshot exists.
-    const snap = await prisma.marketSnapshot.findFirst({
-      where: { slug, OR: [{ yesPrice: { lte: RESOLVED_EPS } }, { yesPrice: { gte: 1 - RESOLVED_EPS } }] },
-    });
-    let yesFinal: number | null = null;
-    let question = "";
-    let category: string | null = null;
-    let spread: number | null = null;
-    let liquidity: number | null = null;
-    if (snap && snap.yesPrice != null) {
-      yesFinal = snap.yesPrice;
-      question = snap.question ?? "";
-      category = snap.category;
-      spread = snap.spread;
-      liquidity = snap.liquidity;
-    } else {
-      let mkt: Awaited<ReturnType<typeof getMarketBySlug>> = null;
-      try {
-        mkt = await getMarketBySlug(slug);
-      } catch (e) {
-        console.warn(`reviewOutcomes: getMarketBySlug failed for ${slug}: ${(e as Error).message}`);
-        continue;
-      }
-      if (!mkt) continue;
-      yesFinal = Number(mkt.outcomePrices[0]); // YES outcome price
-      question = mkt.question ?? "";
-      category = mkt.category;
-      spread = mkt.spread;
-      liquidity = mkt.liquidity;
-      await prisma.marketSnapshot.create({
-        data: {
-          marketId: pts[0].marketId,
-          conditionId: pts[0].decisionJournal?.observedTrade?.conditionId ?? null,
-          slug,
-          question,
-          category,
-      yesPrice: yesFinal ?? null,
-      noPrice: Number(mkt.outcomePrices[1]) ?? null,
-          spread,
-          liquidity,
-          rawMarketJson: JSON.stringify(mkt),
-        },
-      });
+  for (const [slug, trades] of bySlug) {
+    let market: Awaited<ReturnType<typeof getMarketBySlug>>;
+    try {
+      market = await getMarketBySlug(slug);
+    } catch (e) {
+      console.warn(`reviewOutcomes: getMarketBySlug failed for ${slug}: ${(e as Error).message}`);
+      continue;
     }
-    if (yesFinal == null || Number.isNaN(yesFinal)) continue;
-    // Resolution = terminal YES price (~0 or ~1). gamma endDate is often null,
-    // so we detect on price alone (pre-resolution favorites rarely exceed 0.995).
-    const isResolved = yesFinal >= 1 - RESOLVED_EPS || yesFinal <= RESOLVED_EPS;
-    if (!isResolved) continue;
-    for (const pt of pts) {
-      // Determine win based on the OUTCOME TOKEN purchased, not side.
-      // outcome="Yes" → wins if YES resolves to 1 (yesFinal >= 0.995)
-      // outcome="No" → wins if NO resolves to 1 (yesFinal <= 0.005)
-      const outcomeToken = (pt.outcome ?? "Yes").toLowerCase();
-      const won = outcomeToken === "no" 
-        ? yesFinal <= RESOLVED_EPS   // NO token wins when YES → 0
-        : yesFinal >= 1 - RESOLVED_EPS; // YES token wins when YES → 1
+    if (!market || !market.closed) continue;
+
+    const terminal = market.outcomePrices.every((p) => Number.isFinite(p) && (p <= RESOLVED_EPS || p >= 1 - RESOLVED_EPS));
+    if (!terminal) continue;
+
+    await prisma.marketSnapshot.create({
+      data: {
+        marketId: trades[0].marketId,
+        conditionId: trades[0].decisionJournal?.observedTrade?.conditionId ?? market.conditionId,
+        slug,
+        question: market.question,
+        category: market.category,
+        yesPrice: market.outcomePrices[0] ?? null,
+        noPrice: market.outcomePrices[1] ?? null,
+        spread: market.spread,
+        liquidity: market.liquidity,
+        rawMarketJson: JSON.stringify(market),
+      },
+    });
+
+    for (const pt of trades) {
+      let tokenIndex = pt.tokenId ? market.clobTokenIds.indexOf(pt.tokenId) : -1;
+      if (tokenIndex < 0 && pt.outcome) {
+        tokenIndex = market.outcomes.findIndex((x) => x.toLowerCase() === pt.outcome!.toLowerCase());
+      }
+      if (tokenIndex < 0) continue;
+
+      const settlementPrice = market.outcomePrices[tokenIndex];
+      if (!Number.isFinite(settlementPrice)) continue;
+      const won = settlementPrice >= 1 - RESOLVED_EPS;
       const updated = resolvePaperTrade(
         {
           walletAddress: pt.walletAddress,
           marketId: pt.marketId,
-          outcome: pt.outcome ?? "YES",
+          outcome: pt.outcome ?? market.outcomes[tokenIndex] ?? "YES",
           side: pt.side ?? "BUY",
           entryPrice: pt.entryPrice ?? 0.5,
           simulatedPositionSize: pt.simulatedPositionSize ?? 10,
@@ -106,15 +86,19 @@ export async function runReviewOutcomes(): Promise<void> {
         },
         won ? "win" : "lose",
       );
+
       await prisma.paperTrade.update({
         where: { id: pt.id },
         data: {
-          status: updated.status,
+          status: "resolved",
+          currentPrice: won ? 1 : 0,
           realizedPnl: updated.realizedPnl,
           unrealizedPnl: 0,
+          closedAt: new Date(updated.closedAt!),
           resolvedAt: new Date(updated.resolvedAt!),
         },
       });
+
       if (pt.decisionJournal) {
         await prisma.outcomeReview.create({
           data: {
@@ -123,16 +107,17 @@ export async function runReviewOutcomes(): Promise<void> {
             finalOutcome: won ? 1 : 0,
             simulatedPnl: updated.realizedPnl,
             wasDecisionGood: (updated.realizedPnl ?? 0) > 0,
-            priceAfter1h: yesFinal,
-            priceAfter6h: yesFinal,
-            priceAfter24h: yesFinal,
+            priceAfter1h: settlementPrice,
+            priceAfter6h: settlementPrice,
+            priceAfter24h: settlementPrice,
           },
         });
-        resolved++;
       }
+      resolved++;
     }
-    await new Promise((r) => setTimeout(r, 120)); // respect gamma rate limits
+    await new Promise((r) => setTimeout(r, 100));
   }
+
   console.log(`reviewOutcomes done: ${resolved} trades resolved`);
 }
 
