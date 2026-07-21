@@ -218,7 +218,7 @@ export async function getLiveBasket(id: string): Promise<StoredLiveBasket | null
 }
 
 export async function listPendingLiveBaskets(): Promise<StoredLiveBasket[]> {
-  return rows(`SELECT * FROM ${TABLE} WHERE status = 'matched_pending' ORDER BY submitted_at ASC`);
+  return rows(`SELECT * FROM ${TABLE} WHERE status IN ('submitting','matched_pending') ORDER BY submitted_at ASC`);
 }
 
 export async function listFilledLiveBaskets(): Promise<StoredLiveBasket[]> {
