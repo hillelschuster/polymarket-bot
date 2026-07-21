@@ -38,7 +38,7 @@ export async function runReviewOutcomes(): Promise<void> {
       console.warn(`reviewOutcomes: getMarketBySlug failed for ${slug}: ${(e as Error).message}`);
       continue;
     }
-    if (!market || !market.closed || market.acceptingOrders) continue;
+    if (!market || !market.closed) continue;
 
     const terminal = market.outcomePrices.every((p) => Number.isFinite(p) && (p <= RESOLVED_EPS || p >= 1 - RESOLVED_EPS));
     if (!terminal) continue;
