@@ -93,8 +93,10 @@ export async function runScanCalendarArbitrage(): Promise<CalendarScanResult> {
       continue;
     }
 
-    const earlyTop = quoteBuyShares(earlyBook, earlyFeeBps, 1);
-    const lateTop = quoteBuyShares(lateBook, lateFeeBps, 1);
+    const earlyProbeShares = Math.max(1, Number(earlyBook.min_order_size ?? 1));
+    const lateProbeShares = Math.max(1, Number(lateBook.min_order_size ?? 1));
+    const earlyTop = quoteBuyShares(earlyBook, earlyFeeBps, earlyProbeShares);
+    const lateTop = quoteBuyShares(lateBook, lateFeeBps, lateProbeShares);
     if (!earlyTop || !lateTop) { skip("empty-book"); continue; }
     const topCombined = earlyTop.allInPrice + lateTop.allInPrice;
     if (topCombined <= 0 || topCombined > MAX_COMBINED_COST) { skip("cost-too-high"); continue; }
