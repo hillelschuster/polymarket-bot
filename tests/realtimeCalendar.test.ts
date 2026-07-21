@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { GammaMarket, OrderBook } from "../src/adapters/polymarket.js";
-import { findCalendarPairs } from "../src/lib/calendarArbitrage.js";
+import { calendarDeadlineMs, findCalendarPairs } from "../src/lib/calendarArbitrage.js";
 import { quoteCalendarBasket } from "../src/lib/calendarExecution.js";
 import { takerFeePerShare } from "../src/lib/executableQuotes.js";
 import { applyMarketMessage, RealtimeOrderBook, worstAskForShares, worstBidForShares } from "../src/lib/realtimeOrderBook.js";
@@ -47,6 +47,15 @@ describe("calendar pair discovery", () => {
     const early = market("1", "Will X happen by July 25, 2027?", "2027-07-25T23:59:00Z", "event-a");
     const late = market("2", "Will X happen by July 31, 2027?", "2027-07-31T23:59:00Z", "event-b");
     expect(findCalendarPairs([early, late], Date.parse("2027-07-20T00:00:00Z"))).toHaveLength(1);
+  });
+
+  it("orders legs by the question deadline, not metadata endDate", () => {
+    const sharedEnd = "2027-08-02T00:00:00Z";
+    const late = market("3", "Will X happen by July 31, 2027?", sharedEnd, "event-c");
+    const early = market("4", "Will X happen by July 25, 2027?", sharedEnd, "event-d");
+    const [pair] = findCalendarPairs([late, early], Date.parse("2027-07-20T00:00:00Z"));
+    expect(calendarDeadlineMs(pair.early)).toBeLessThan(calendarDeadlineMs(pair.late)!);
+    expect(pair.early.id).toBe("4");
   });
 });
 
