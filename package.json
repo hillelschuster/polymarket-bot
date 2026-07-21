@@ -12,6 +12,7 @@
     "scan:leaderboard": "tsx src/jobs/scanLeaderboard.ts",
     "scan:wallets": "tsx src/jobs/scanWallets.ts",
     "scan:politics": "tsx src/jobs/scanPoliticalFavorites.ts",
+    "scan:calendar": "tsx src/jobs/scanCalendarArbitrage.ts",
     "monitor:trades": "tsx src/jobs/monitorTrades.ts",
     "score:trades": "tsx src/jobs/scoreTrades.ts",
     "paper:update-pnl": "tsx src/jobs/paperUpdatePnl.ts",
