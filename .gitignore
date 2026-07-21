@@ -1,0 +1,11 @@
+node_modules
+.next
+.env
+.env*.local
+dev.db
+dev.db-journal
+*.tsbuildinfo
+*.log
+prisma/migrations
+.qoder
+.opencode

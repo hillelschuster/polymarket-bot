@@ -1,0 +1,46 @@
+{
+  "name": "hermes-polymarket-bot",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
+    "db:migrate": "prisma migrate dev --name init",
+    "db:push": "prisma db push",
+    "seed": "tsx src/jobs/seed.ts",
+    "scan:leaderboard": "tsx src/jobs/scanLeaderboard.ts",
+    "scan:wallets": "tsx src/jobs/scanWallets.ts",
+    "scan:politics": "tsx src/jobs/scanPoliticalFavorites.ts",
+    "monitor:trades": "tsx src/jobs/monitorTrades.ts",
+    "score:trades": "tsx src/jobs/scoreTrades.ts",
+    "paper:update-pnl": "tsx src/jobs/paperUpdatePnl.ts",
+    "review:outcomes": "tsx src/jobs/reviewOutcomes.ts",
+    "update:rules": "tsx src/jobs/updateRules.ts",
+    "report:daily": "tsx src/jobs/reportDaily.ts",
+    "pipeline": "tsx src/jobs/runAll.ts",
+    "backtest": "tsx src/jobs/backtest.ts",
+    "loop": "tsx src/jobs/loop.ts",
+    "generate": "prisma generate",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@prisma/client": "^6.1.0",
+    "next": "^15.1.0",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0",
+    "zod": "^3.24.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "@types/react": "^19.0.0",
+    "@types/react-dom": "^19.0.0",
+    "autoprefixer": "^10.4.20",
+    "postcss": "^8.4.49",
+    "prisma": "^6.1.0",
+    "tailwindcss": "^3.4.17",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.0",
+    "vitest": "^2.1.8"
+  }
+}

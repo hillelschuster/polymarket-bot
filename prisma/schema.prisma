@@ -1,0 +1,235 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+model LeaderboardScan {
+  id             String         @id @default(cuid())
+  source         String
+  scannedAt      DateTime
+  walletCount    Int
+  lookbackDays   Int
+  rawSummaryJson String
+  createdAt      DateTime       @default(now())
+  wallets        WalletProfile[]
+}
+
+model WalletProfile {
+  id                   String           @id @default(cuid())
+  address              String           @unique
+  label                String?
+  sourceRank           Int?
+  status               String // track | watch | ignore
+  roi30d               Float?
+  consistencyScore     Float?
+  copyabilityScore     Float?
+  oneHitWonderPenalty  Float?
+  globalScore          Float?
+  bestCategory         String?
+  categoryStrengthsJson String?
+  scoreComponentsJson  String?
+  averageTradeSize     Float?
+  tradeCount30d        Int?
+  resolvedTradeCount30d Int?
+  winRate30d           Float?
+  averageLiquidity     Float?
+  averageSpread        Float?
+  averageEntryTiming   Float?
+  copyabilityNotes     String?
+  riskNotes            String?
+  lastScannedAt        DateTime?
+  createdAt            DateTime         @default(now())
+  updatedAt            DateTime         @updatedAt
+  scanId               String?
+  scan                 LeaderboardScan? @relation(fields: [scanId], references: [id])
+  observedTrades       ObservedTrade[]
+}
+
+model ObservedTrade {
+  id              String           @id @default(cuid())
+  walletAddress   String
+  marketId        String
+  conditionId     String?
+  slug            String?
+  tokenId         String?
+  marketQuestion  String?
+  marketCategory  String?
+  marketLiquidity Float?
+  marketSpread    Float?
+  outcome         String?
+  outcomeIndex    Int?
+  side            String?
+  walletEntryPrice Float?
+  detectedPrice   Float?
+  size            Float?
+  timestamp       DateTime?
+  rawTradeJson    String?
+  createdAt       DateTime         @default(now())
+  wallet          WalletProfile?   @relation(fields: [walletAddress], references: [address])
+  decision        DecisionJournal?
+}
+
+model MarketSnapshot {
+  id               String   @id @default(cuid())
+  marketId         String
+  conditionId      String?
+  slug             String?
+  question         String?
+  category         String?
+  yesPrice         Float?
+  noPrice          Float?
+  bestBid          Float?
+  bestAsk          Float?
+  spread           Float?
+  liquidity        Float?
+  volume           Float?
+  timeToResolution Float?
+  collectedAt      DateTime @default(now())
+  rawMarketJson    String?
+}
+
+model DecisionJournal {
+  id                 String        @id @default(cuid())
+  observedTradeId    String        @unique
+  walletAddress      String
+  marketId           String
+  decision           String // paper_copy | watchlist | skip
+  copyScore          Float?
+  confidence         Float?
+  reasonsJson        String?
+  risksJson          String?
+  walletQualityScore Float?
+  roiScore           Float?
+  consistencyScore   Float?
+  copyabilityScore   Float?
+  categoryFitScore   Float?
+  entryTimingScore   Float?
+  spreadScore        Float?
+  liquidityScore     Float?
+  thesisScore        Float?
+  simulatedPositionSize Float?
+  createdAt          DateTime      @default(now())
+  observedTrade      ObservedTrade? @relation(fields: [observedTradeId], references: [id])
+  outcomeReview      OutcomeReview?
+  paperTrade         PaperTrade?
+}
+
+model PaperTrade {
+  id                  String         @id @default(cuid())
+  decisionJournalId   String?        @unique
+  walletAddress       String
+  marketId         String
+  slug             String?
+  tokenId          String?
+  outcome             String?
+  side                String?
+  entryPrice          Float?
+  currentPrice        Float?
+  simulatedPositionSize Float?
+  unrealizedPnl       Float?
+  realizedPnl         Float?
+  status              String // open | closed | resolved
+  source              String         @default("wallet_copy") // wallet_copy | strategy
+  strategySignalId    String?
+  openedAt            DateTime       @default(now())
+  closedAt            DateTime?
+  resolvedAt          DateTime?
+  decisionJournal     DecisionJournal? @relation(fields: [decisionJournalId], references: [id])
+  pnlSnapshots        PnlSnapshot[]
+}
+
+model PnlSnapshot {
+  id          String      @id @default(cuid())
+  paperTradeId String
+  price       Float?
+  pnl         Float?
+  collectedAt DateTime    @default(now())
+  paperTrade  PaperTrade? @relation(fields: [paperTradeId], references: [id])
+}
+
+model OutcomeReview {
+  id               String          @id @default(cuid())
+  decisionJournalId String          @unique
+  paperTradeId     String?
+  reviewTime       DateTime        @default(now())
+  priceAfter1h     Float?
+  priceAfter6h     Float?
+  priceAfter24h    Float?
+  finalOutcome     Float?
+  simulatedPnl     Float?
+  wasDecisionGood  Boolean?
+  lessonsJson      String?
+  createdAt        DateTime        @default(now())
+  decisionJournal  DecisionJournal? @relation(fields: [decisionJournalId], references: [id])
+}
+
+model RuleSet {
+  id        String       @id @default(cuid())
+  version   Int
+  active    Boolean      @default(false)
+  rulesJson String
+  createdAt DateTime     @default(now())
+  updatedAt DateTime     @updatedAt
+  changesAsOld RuleChange[] @relation("old")
+  changesAsNew RuleChange[] @relation("new")
+}
+
+model RuleChange {
+  id              String   @id @default(cuid())
+  oldRuleSetId    String
+  newRuleSetId    String
+  changedBy       String // hermes
+  reason          String
+  evidenceSummary String?
+  beforeJson      String
+  afterJson       String
+  createdAt       DateTime @default(now())
+  oldRuleSet      RuleSet? @relation("old", fields: [oldRuleSetId], references: [id])
+  newRuleSet      RuleSet? @relation("new", fields: [newRuleSetId], references: [id])
+}
+
+model StrategySignal {
+  id               String   @id @default(cuid())
+  strategy         String // political_favorites | calendar_arb | endgame | crash_reversion
+  marketId         String
+  slug             String?
+  question         String?
+  category         String?
+  outcome          String // Yes | No
+  side             String // BUY
+  entryPrice       Float
+  favoritePrice    Float
+  liquidity        Float?
+  spread           Float?
+  volume           Float?
+  daysToResolution Float?
+  edgeEstimate     Float?
+  reasonsJson      String?
+  status           String // paper_copy | skip
+  paperTradeId     String?
+  createdAt        DateTime @default(now())
+}
+
+model DailyReport {
+  id               String   @id @default(cuid())
+  date             DateTime @unique
+  paperPnl         Float?
+  winRate          Float?
+  openPositions    Int?
+  newSignals       Int?
+  copiedSignals    Int?
+  watchedSignals   Int?
+  skippedSignals   Int?
+  winningPositions Int?
+  unrealizedPnl    Float?
+  bestWalletsJson  String?
+  worstWalletsJson String?
+  ruleChangesJson  String?
+  summary          String?
+  sentToTelegram   Boolean  @default(false)
+  createdAt        DateTime @default(now())
+}
