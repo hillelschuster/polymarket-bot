@@ -76,6 +76,15 @@ export async function runMonitorTrades(): Promise<void> {
     return promise;
   };
 
+  // Keep API work concurrent, but serialize SQLite writes through one queue. This prevents
+  // database-lock failures from turning captured wallet fills into missed signals.
+  let dbWriteTail: Promise<unknown> = Promise.resolve();
+  const enqueueDbWrite = <T>(operation: () => Promise<T>): Promise<T> => {
+    const result = dbWriteTail.then(operation);
+    dbWriteTail = result.then(() => undefined, () => undefined);
+    return result;
+  };
+
   let fetched = 0;
   let stored = 0;
   let failedWallets = 0;
@@ -114,7 +123,7 @@ export async function runMonitorTrades(): Promise<void> {
         if (existingSignatures.has(signature) && !existingRows.some((row) => row.id === trade.id)) continue;
         const slug = trade.slug;
         const market = slug ? await marketFor(slug) : null;
-        await prisma.observedTrade.upsert({
+        await enqueueDbWrite(() => prisma.observedTrade.upsert({
           where: { id: trade.id },
           create: {
             id: trade.id,
@@ -137,7 +146,7 @@ export async function runMonitorTrades(): Promise<void> {
             rawTradeJson: JSON.stringify(trade),
           },
           update: {},
-        });
+        }));
         stored++;
         existingSignatures.add(signature);
       }
@@ -147,6 +156,7 @@ export async function runMonitorTrades(): Promise<void> {
     }
   });
 
+  await dbWriteTail;
   console.log(
     `monitorTrades done: ${stored} fills processed (${fetched} fetched) from ${eligible.length} wallets `
     + `(${track.length} core${scanWatch ? ` + ${watch.length} exploratory` : ""}), ${failedWallets} wallet failures`,
