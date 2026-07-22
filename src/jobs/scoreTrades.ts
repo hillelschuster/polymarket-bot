@@ -2,7 +2,8 @@
 // The fundamental strategy remains wallet copying. Uncertainty changes size; it does not
 // automatically kill a coherent signal.
 import { prisma } from "../lib/db.js";
-import { scoreTradeByMarket, DEFAULT_RULES, categoryFromSlug, getFavoriteGate, type RuleSetValues } from "../lib/scoring.js";
+import { scoreTradeByMarket, DEFAULT_RULES, getFavoriteGate, type RuleSetValues } from "../lib/scoring.js";
+import { walletCopyCategory } from "../lib/walletCopyCategory.js";
 import { closePaperTrade } from "../lib/paper.js";
 import { getMarketBySlug, getExecutableBuyQuote, getExecutableSellQuote, type BuyQuote } from "../adapters/polymarket.js";
 
@@ -17,8 +18,8 @@ const LOGIC_VERSION = "v5-profit-auction";
 const STARTING_BANKROLL = Number(process.env.PAPER_BANKROLL ?? 300);
 const MAX_DEPLOYED_FRACTION = Number(process.env.PAPER_MAX_DEPLOYED_FRACTION ?? 0.70);
 const MAX_EVENT_FRACTION = Number(process.env.PAPER_MAX_EVENT_FRACTION ?? 0.10);
-const MAX_CATEGORY_FRACTION = Number(process.env.PAPER_MAX_CATEGORY_FRACTION ?? 0.25);
-const MAX_WALLET_FRACTION = Number(process.env.PAPER_MAX_WALLET_FRACTION ?? 0.25);
+const MAX_CATEGORY_FRACTION = Number(process.env.PAPER_MAX_CATEGORY_FRACTION ?? MAX_DEPLOYED_FRACTION);
+const MAX_WALLET_FRACTION = Number(process.env.PAPER_MAX_WALLET_FRACTION ?? 0.35);
 
 interface Perf {
   count: number;
@@ -204,7 +205,7 @@ export async function runScoreTrades(): Promise<void> {
 
   for (const copy of allCopies) {
     const wallet = copy.walletAddress.toLowerCase();
-    const category = categoryFromSlug(copy.slug) ?? "unknown";
+    const category = walletCopyCategory(copy.slug) ?? `unknown:${copy.marketId}`;
     addPerf(walletPerf, wallet, copy);
     addPerf(categoryPerf, `${wallet}|${category}`, copy);
     if (copy.status === "open") {
@@ -316,7 +317,7 @@ export async function runScoreTrades(): Promise<void> {
     ], 100);
 
     const size = open.simulatedPositionSize;
-    const category = categoryFromSlug(open.slug) ?? "unknown";
+    const category = walletCopyCategory(open.slug) ?? `unknown:${open.marketId}`;
     deployable += size;
     eventExposure.set(open.marketId, Math.max(0, (eventExposure.get(open.marketId) ?? 0) - size));
     categoryExposure.set(category, Math.max(0, (categoryExposure.get(category) ?? 0) - size));
@@ -354,7 +355,8 @@ export async function runScoreTrades(): Promise<void> {
       return null;
     }
 
-    const category = observed.marketCategory ?? categoryFromSlug(observed.slug) ?? null;
+    const market = observed.slug ? marketBySlug.get(observed.slug) : null;
+    const category = walletCopyCategory(observed.slug, observed.marketCategory ?? market?.category);
     const isSports = category === "sports";
     const maxAge = isSports ? SPORTS_MAX_AGE_MS : NON_SPORTS_MAX_AGE_MS;
     const signalAge = observed.timestamp
@@ -372,8 +374,12 @@ export async function runScoreTrades(): Promise<void> {
       skipped++;
       return null;
     }
+    if (market && (market.closed || !market.active || !market.acceptingOrders)) {
+      await writeDecision(observed, "skip", ["market is closed or not accepting orders"]);
+      skipped++;
+      return null;
+    }
 
-    const market = observed.slug ? marketBySlug.get(observed.slug) : null;
     const idx = market?.clobTokenIds.indexOf(String(observed.tokenId)) ?? -1;
     const midpoint = idx >= 0 && market && idx in market.outcomePrices
       ? market.outcomePrices[idx]
@@ -434,7 +440,7 @@ export async function runScoreTrades(): Promise<void> {
       return null;
     }
 
-    const categoryEvidence = categoryPerf.get(`${walletKey}|${category ?? "unknown"}`);
+    const categoryEvidence = categoryPerf.get(`${walletKey}|${category ?? `unknown:${observed.marketId}`}`);
     const existing = openByWalletToken.get(key(observed.walletAddress, observed.marketId, observed.tokenId));
     const consensusWallets = Math.max(
       freshWalletsByToken.get(observed.tokenId)?.size ?? 1,
@@ -566,7 +572,7 @@ export async function runScoreTrades(): Promise<void> {
       0,
       equity * MAX_EVENT_FRACTION - (eventExposure.get(observed.marketId) ?? 0),
     );
-    const categoryKey = category ?? "unknown";
+    const categoryKey = category ?? `unknown:${observed.marketId}`;
     const categoryRoom = Math.max(
       0,
       equity * MAX_CATEGORY_FRACTION - (categoryExposure.get(categoryKey) ?? 0),
@@ -589,8 +595,22 @@ export async function runScoreTrades(): Promise<void> {
     let finalQuote = quote;
     if (Math.abs(budget - candidate.proposedBudget) > 0.01) {
       try {
-        finalQuote = await getExecutableBuyQuote(observed.tokenId, budget) ?? quote;
-      } catch { /* retain conservative prior quote */ }
+        const resized = await getExecutableBuyQuote(observed.tokenId, budget);
+        if (resized) finalQuote = resized;
+        else finalQuote = {
+          ...quote,
+          shares: budget / quote.allInPrice,
+          cashCost: budget,
+          fee: quote.cashCost > 0 ? quote.fee * (budget / quote.cashCost) : 0,
+        };
+      } catch {
+        finalQuote = {
+          ...quote,
+          shares: budget / quote.allInPrice,
+          cashCost: budget,
+          fee: quote.cashCost > 0 ? quote.fee * (budget / quote.cashCost) : 0,
+        };
+      }
     }
 
     const decision = existing ? "paper_scale_in" : "paper_copy";
