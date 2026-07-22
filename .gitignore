@@ -7,5 +7,6 @@ dev.db-journal
 *.tsbuildinfo
 *.log
 prisma/migrations
+data/backtests/
 .qoder
 .opencode
