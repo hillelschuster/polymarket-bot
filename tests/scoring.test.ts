@@ -255,12 +255,12 @@ describe("walletCopySkipReason (copy-performance filter)", () => {
   });
 
   it("drops a (wallet, side) that loses on average once enough samples", () => {
-    const r = walletCopySkipReason({ ...base, side: "BUY", count: 5, avgPnl: -0.4 });
+    const r = walletCopySkipReason({ ...base, side: "BUY", count: 5, avgPnl: -0.4, winRate: 0.5 });
     expect(r).toContain("avg PnL");
   });
 
   it("keeps a (wallet, side) that wins on average", () => {
-    expect(walletCopySkipReason({ ...base, side: "SELL", count: 5, avgPnl: 0.3 })).toBeNull();
+    expect(walletCopySkipReason({ ...base, side: "SELL", count: 5, avgPnl: 0.3, winRate: 0.6 })).toBeNull();
   });
 
   it("does NOT drop a losing side before minWalletCopyCount (let it prove itself)", () => {

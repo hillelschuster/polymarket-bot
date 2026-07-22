@@ -9,11 +9,12 @@ import { createPaperTrade } from "../lib/paper.js";
 import { getMarketBySlug, getExecutableBuyQuote } from "../adapters/polymarket.js";
 
 // --- Constants ---
-const MAX_SIGNAL_AGE_MS = 10 * 60 * 1000; // 10 minutes — reject stale wallet signals
+const MAX_SIGNAL_AGE_MS = 10 * 60 * 1000; // 10 minutes — default for non-sports
+const SPORTS_SIGNAL_AGE_MS = 20 * 60 * 1000; // 20 minutes — sports games last hours, 20-min delay still tradeable
 const SPORTS_MIN_HOURS_TO_RESOLUTION = 0.5; // 30 min — reject if game almost over
 const SPORTS_MAX_DAYS_TO_RESOLUTION = 2; // reject sports >2 days out (not in-game)
 const MAX_SPREAD_HARD_GATE = 0.05; // 5% — hard reject wide spreads
-const LOGIC_VERSION = "v3-audited";
+const LOGIC_VERSION = "v4-wallet-copy";
 
 /**
  * Parse resolution time from sports slugs like "mlb-wsh-col-2026-07-21".
@@ -129,14 +130,15 @@ export async function runScoreTrades(): Promise<void> {
     const category = ot.marketCategory ?? categoryFromSlug(ot.slug) ?? null;
     const isSports = category === "sports";
 
-    // --- GATE 1: Signal age (reject stale wallet signals) ---
+    // --- GATE 1: Signal age (sports get 20 min; everything else 10 min) ---
+    const maxAge = isSports ? SPORTS_SIGNAL_AGE_MS : MAX_SIGNAL_AGE_MS;
     const signalAge = ot.timestamp ? Date.now() - ot.timestamp.getTime() : Infinity;
-    if (signalAge > MAX_SIGNAL_AGE_MS) {
+    if (signalAge > maxAge) {
       await prisma.decisionJournal.create({
         data: {
           observedTradeId: ot.id, walletAddress: ot.walletAddress, marketId: ot.marketId,
           decision: "skip", copyScore: 0,
-          reasonsJson: JSON.stringify([`signal age ${(signalAge / 60000).toFixed(0)}min > 10min`, LOGIC_VERSION]),
+          reasonsJson: JSON.stringify([`signal age ${(signalAge / 60000).toFixed(0)}min > ${(maxAge / 60000).toFixed(0)}min`, LOGIC_VERSION]),
           walletQualityScore: walletGlobalScore,
         },
       });
@@ -144,7 +146,19 @@ export async function runScoreTrades(): Promise<void> {
       continue;
     }
 
-    // --- GATE 2: Wallet copy-performance filter ---
+    // --- GATE 2: Wallet quality + copy-performance filter ---
+    // Enforce minimum wallet global score (leaderboard quality signal)
+    if (walletGlobalScore < rules.minWalletGlobal) {
+      await prisma.decisionJournal.create({
+        data: {
+          observedTradeId: ot.id, walletAddress: ot.walletAddress, marketId: ot.marketId,
+          decision: "skip", copyScore: 0,
+          reasonsJson: JSON.stringify([`wallet globalScore ${walletGlobalScore} < min ${rules.minWalletGlobal}`, LOGIC_VERSION]),
+          walletQualityScore: walletGlobalScore,
+        },
+      });
+      continue;
+    }
     const perf = copyPerf.get(`${ot.walletAddress}|${side}`);
     const totalPnl = walletTotalPnl.get(ot.walletAddress) ?? 0;
     const openCount = walletOpenCount.get(ot.walletAddress) ?? 0;

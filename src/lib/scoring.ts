@@ -407,6 +407,8 @@ export function walletCopySkipReason(rec: WalletCopyRecord, rules = DEFAULT_RULE
     return `wallet total copy PnL $${rec.totalPnl.toFixed(2)} < ${rules.maxWalletLoss} (catastrophic-loss stop)`;
   if (rec.openCount >= rules.maxCopiesPerWallet)
     return `wallet already has ${rec.openCount} open copies (diversification cap)`;
+  if (rec.count >= rules.minWalletCopyCount && rec.winRate < rules.minWalletCopyWinRate)
+    return `${rec.side} copies winRate ${(rec.winRate * 100).toFixed(0)}% < ${(rules.minWalletCopyWinRate * 100).toFixed(0)}% over ${rec.count} copies`;
   if (rec.count >= rules.minWalletCopyCount && rec.avgPnl < 0)
     return `${rec.side} copies avg PnL $${rec.avgPnl.toFixed(2)} < 0 over ${rec.count} copies`;
   return null;
