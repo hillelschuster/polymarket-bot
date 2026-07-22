@@ -13,7 +13,7 @@ const MAX_SIGNAL_AGE_MS = 10 * 60 * 1000; // 10 minutes — reject stale wallet 
 const SPORTS_MIN_HOURS_TO_RESOLUTION = 0.5; // 30 min — reject if game almost over
 const SPORTS_MAX_DAYS_TO_RESOLUTION = 2; // reject sports >2 days out (not in-game)
 const MAX_SPREAD_HARD_GATE = 0.05; // 5% — hard reject wide spreads
-const LOGIC_VERSION = "v2-fail-closed";
+const LOGIC_VERSION = "v3-audited";
 
 /**
  * Parse resolution time from sports slugs like "mlb-wsh-col-2026-07-21".
@@ -88,8 +88,8 @@ export async function runScoreTrades(): Promise<void> {
     copyPerf.set(k, e);
     walletTotalPnl.set(c.walletAddress, (walletTotalPnl.get(c.walletAddress) ?? 0) + pnl);
     if (c.status === "open") walletOpenCount.set(c.walletAddress, (walletOpenCount.get(c.walletAddress) ?? 0) + 1);
-    // Track existing copies for persistent dedup
-    if (c.status === "open") existingCopies.add(`${c.marketId}|${c.tokenId}`);
+    // Track existing copies for persistent dedup (ALL statuses — not just open)
+    existingCopies.add(`${c.marketId}|${c.tokenId}`);
   }
   for (const e of copyPerf.values()) {
     e.avgPnl /= e.count;
@@ -113,7 +113,19 @@ export async function runScoreTrades(): Promise<void> {
 
   for (const ot of unscored) {
     const walletGlobalScore = ot.wallet?.globalScore ?? 50;
-    const side = ot.side ?? "BUY";
+    // --- GATE 0: Only BUY is supported (we buy outcome tokens; SELL is fictional) ---
+    const side = (ot.side ?? "BUY").toUpperCase();
+    if (side !== "BUY") {
+      await prisma.decisionJournal.create({
+        data: {
+          observedTradeId: ot.id, walletAddress: ot.walletAddress, marketId: ot.marketId,
+          decision: "skip", copyScore: 0,
+          reasonsJson: JSON.stringify([`SELL not supported (only BUY tokens; SELL is fictional)`, LOGIC_VERSION]),
+          walletQualityScore: walletGlobalScore,
+        },
+      });
+      continue;
+    }
     const category = ot.marketCategory ?? categoryFromSlug(ot.slug) ?? null;
     const isSports = category === "sports";
 
@@ -208,6 +220,10 @@ export async function runScoreTrades(): Promise<void> {
         continue;
       }
       daysToResolution = hours / 24;
+      // For scoreTradeByMarket: bypass the global 3-day gate for sports.
+      // We already validated sports-specific timing above (30min min, unknown reject).
+      // Pass sweetDaysToResolution so the global gate doesn't double-reject.
+      daysToResolution = rules.sweetDaysToResolution;
     } else {
       // Non-sports: use global minDaysToResolution
       daysToResolution = m?.endDate
@@ -311,14 +327,39 @@ export async function runScoreTrades(): Promise<void> {
     }
 
     // --- GATE 7: Validate executable quote against gates ---
-    // Re-check favorite gate on the EXECUTABLE price (not midpoint)
-    const execFavoritePrice = side === "BUY" ? quote.allInPrice : 1 - quote.allInPrice;
-    if (execFavoritePrice < gate) {
+    // Upper-price cap: reject if all-in entry exceeds top threshold
+    if (quote.allInPrice > rules.topThreshold) {
       await prisma.decisionJournal.create({
         data: {
           observedTradeId: ot.id, walletAddress: ot.walletAddress, marketId: ot.marketId,
           decision: "skip", copyScore: 0,
-          reasonsJson: JSON.stringify([`executable allIn ${quote.allInPrice.toFixed(4)} fails favorite gate ${gate}`, LOGIC_VERSION]),
+          reasonsJson: JSON.stringify([`executable allIn ${quote.allInPrice.toFixed(4)} > top ${rules.topThreshold}`, LOGIC_VERSION]),
+          walletQualityScore: walletGlobalScore,
+        },
+      });
+      rejectedGates++;
+      continue;
+    }
+    // Hard spread gate on CLOB quote (not stale Gamma spread)
+    if (quote.spread != null && quote.spread > MAX_SPREAD_HARD_GATE) {
+      await prisma.decisionJournal.create({
+        data: {
+          observedTradeId: ot.id, walletAddress: ot.walletAddress, marketId: ot.marketId,
+          decision: "skip", copyScore: 0,
+          reasonsJson: JSON.stringify([`CLOB spread ${(quote.spread * 100).toFixed(1)}% > ${MAX_SPREAD_HARD_GATE * 100}% hard gate`, LOGIC_VERSION]),
+          walletQualityScore: walletGlobalScore,
+        },
+      });
+      rejectedGates++;
+      continue;
+    }
+    // Favorite gate on the EXECUTABLE price (not midpoint)
+    if (quote.allInPrice < gate) {
+      await prisma.decisionJournal.create({
+        data: {
+          observedTradeId: ot.id, walletAddress: ot.walletAddress, marketId: ot.marketId,
+          decision: "skip", copyScore: 0,
+          reasonsJson: JSON.stringify([`executable allIn ${quote.allInPrice.toFixed(4)} < favorite gate ${gate}`, LOGIC_VERSION]),
           walletQualityScore: walletGlobalScore,
         },
       });
