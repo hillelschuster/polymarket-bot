@@ -10,7 +10,8 @@ export interface FavoriteAtEntry {
   tokenId: string;
   outcomeIndex: number;
   referencePrice: number;
-  tokenPrices: number[];
+  tokenPrices: [number, number];
+  referenceTimestamp: number;
 }
 
 export interface SimulatedFill {
@@ -48,6 +49,7 @@ export interface BacktestRow {
 
 export interface BacktestSummary {
   n: number;
+  independentDays: number;
   wins: number;
   winRate: number;
   cashSpent: number;
@@ -80,7 +82,7 @@ export function takerFeePerShare(price: number, feeRate: number): number {
   return price * (1 - price) * feeRate;
 }
 
-/** Uses only information timestamped at or before entry. */
+/** Uses the freshest market print at or before entry; the opposite token is complementary. */
 export function favoriteAtEntry(
   trades: HistoricalTrade[],
   tokenIds: string[],
@@ -88,23 +90,27 @@ export function favoriteAtEntry(
   maxPriceAgeSeconds: number,
 ): FavoriteAtEntry | null {
   if (tokenIds.length !== 2) return null;
-  const latest = new Map<string, HistoricalTrade>();
   const floor = entryTs - maxPriceAgeSeconds;
+  let latest: HistoricalTrade | null = null;
   for (const trade of trades) {
     if (!tokenIds.includes(trade.asset)) continue;
     if (trade.timestamp < floor || trade.timestamp > entryTs) continue;
     if (!(trade.price > 0 && trade.price < 1)) continue;
-    const prior = latest.get(trade.asset);
-    if (!prior || trade.timestamp > prior.timestamp) latest.set(trade.asset, trade);
+    if (!latest || trade.timestamp > latest.timestamp) latest = trade;
   }
-  const prices = tokenIds.map((id) => latest.get(id)?.price ?? Number.NaN);
-  if (prices.some((p) => !Number.isFinite(p))) return null;
-  const outcomeIndex = prices[0] >= prices[1] ? 0 : 1;
+  if (!latest) return null;
+  const assetIndex = tokenIds.indexOf(latest.asset);
+  if (assetIndex < 0) return null;
+  const tokenPrices: [number, number] = assetIndex === 0
+    ? [latest.price, 1 - latest.price]
+    : [1 - latest.price, latest.price];
+  const outcomeIndex = tokenPrices[0] >= tokenPrices[1] ? 0 : 1;
   return {
     tokenId: tokenIds[outcomeIndex],
     outcomeIndex,
-    referencePrice: prices[outcomeIndex],
-    tokenPrices: prices,
+    referencePrice: tokenPrices[outcomeIndex],
+    tokenPrices,
+    referenceTimestamp: latest.timestamp,
   };
 }
 
@@ -185,17 +191,36 @@ function seededRandom(seed: number): () => number {
   };
 }
 
-export function bootstrapMeanCI(values: number[], iterations = 5_000, seed = 0x5eed): [number, number] {
-  if (!values.length) return [0, 0];
-  if (values.length === 1) return [values[0], values[0]];
+/** Day-block bootstrap preserves same-day correlation across sports bets. */
+export function bootstrapDayRoiCI(rows: BacktestRow[], iterations = 5_000, seed = 0x5eed): [number, number] {
+  if (!rows.length) return [0, 0];
+  const groups = new Map<string, BacktestRow[]>();
+  for (const row of rows) {
+    const day = row.eventStartTime.slice(0, 10);
+    const group = groups.get(day) ?? [];
+    group.push(row);
+    groups.set(day, group);
+  }
+  const days = [...groups.values()];
+  if (days.length === 1) {
+    const cash = rows.reduce((sum, row) => sum + row.cashSpent, 0);
+    const pnl = rows.reduce((sum, row) => sum + row.pnl, 0);
+    const roi = cash ? pnl / cash : 0;
+    return [roi, roi];
+  }
   const random = seededRandom(seed);
   const samples: number[] = [];
   for (let i = 0; i < iterations; i++) {
-    let total = 0;
-    for (let j = 0; j < values.length; j++) {
-      total += values[Math.floor(random() * values.length)];
+    let cash = 0;
+    let pnl = 0;
+    for (let j = 0; j < days.length; j++) {
+      const group = days[Math.floor(random() * days.length)];
+      for (const row of group) {
+        cash += row.cashSpent;
+        pnl += row.pnl;
+      }
     }
-    samples.push(total / values.length);
+    samples.push(cash ? pnl / cash : 0);
   }
   samples.sort((a, b) => a - b);
   return [samples[Math.floor(iterations * 0.025)], samples[Math.floor(iterations * 0.975)]];
@@ -204,17 +229,17 @@ export function bootstrapMeanCI(values: number[], iterations = 5_000, seed = 0x5
 export function summarizeBacktest(rows: BacktestRow[]): BacktestSummary {
   const cashSpent = rows.reduce((sum, row) => sum + row.cashSpent, 0);
   const pnl = rows.reduce((sum, row) => sum + row.pnl, 0);
-  const tradeRois = rows.map((row) => row.roi);
-  const [ci95Low, ci95High] = bootstrapMeanCI(tradeRois);
+  const [ci95Low, ci95High] = bootstrapDayRoiCI(rows);
   const wins = rows.filter((row) => row.won).length;
   return {
     n: rows.length,
+    independentDays: new Set(rows.map((row) => row.eventStartTime.slice(0, 10))).size,
     wins,
     winRate: rows.length ? wins / rows.length : 0,
     cashSpent,
     pnl,
     roi: cashSpent ? pnl / cashSpent : 0,
-    averageTradeRoi: mean(tradeRois),
+    averageTradeRoi: mean(rows.map((row) => row.roi)),
     ci95Low,
     ci95High,
   };
