@@ -30,7 +30,7 @@ interface Config {
   priceLookbackHours: number; maxPriceAgeMinutes: number; fillWindowSeconds: number; budget: number;
   minFillRatio: number; minSample: number; concurrency: number;
 }
-const PAGE_SIZE = 500;
+const PAGE_SIZE = 100; // Gamma API caps at 100 per page regardless of limit param
 const TRADE_LIMIT = 10_000;
 function numberEnv(name: string, fallback: number): number { const value = Number(process.env[name]); return Number.isFinite(value) ? value : fallback; }
 function configFromEnv(): Config {
@@ -78,6 +78,13 @@ function isMoneyline(raw: GammaMarketRaw, outcomes: string[]): boolean {
   const text = `${raw.slug ?? ""} ${raw.question ?? ""}`.toLowerCase();
   return !/(spread|handicap|over.?under|total points|total games|total sets|correct score|winning margin|first set|second set)/i.test(text);
 }
+/** Estimate game start from slug date. MLB games ~23:05 UTC (7:05 PM ET); tennis ~14:00 UTC. */
+function estimateEventStart(slug: string, sport: string): string | null {
+  const match = slug.match(/(\d{4}-\d{2}-\d{2})/);
+  if (!match) return null;
+  const hour = sport === "mlb" ? "23:05:00" : "14:00:00";
+  return `${match[1]}T${hour}Z`;
+}
 function normalizeMarket(raw: GammaMarketRaw, sourceSport: string, config: Config): CandidateMarket | null {
   const id = String(raw.id ?? ""); const conditionId = String(raw.conditionId ?? ""); const slug = String(raw.slug ?? "");
   if (!id || !conditionId || !slug || raw.closed !== true) return null;
@@ -85,7 +92,9 @@ function normalizeMarket(raw: GammaMarketRaw, sourceSport: string, config: Confi
   const outcomes = parseStringList(raw.outcomes); const outcomePrices = parseStringList(raw.outcomePrices).map(Number); const tokenIds = parseStringList(raw.clobTokenIds);
   if (outcomes.length !== 2 || outcomePrices.length !== 2 || tokenIds.length !== 2 || !isMoneyline(raw, outcomes)) return null;
   const winningIndex = parseTerminalWinner(outcomePrices); if (winningIndex == null) return null;
-  const eventStartTime = raw.eventStartTime ?? raw.gameStartTime; if (!eventStartTime) return null;
+  // Gamma rarely provides eventStartTime; fall back to slug-date estimate
+  const eventStartTime = raw.eventStartTime ?? raw.gameStartTime ?? estimateEventStart(slug, sport);
+  if (!eventStartTime) return null;
   const eventStart = new Date(eventStartTime); if (!Number.isFinite(eventStart.getTime()) || eventStart < config.start || eventStart > config.end) return null;
   const tick = Number(raw.orderPriceMinTickSize ?? 0.01); const tickSize = Number.isFinite(tick) && tick > 0 ? tick : 0.01;
   return { sport, id, conditionId, slug, question: String(raw.question ?? ""), gameId: raw.gameId ? String(raw.gameId) : null,
@@ -97,7 +106,13 @@ async function fetchClosedMarketsForTag(tagId: string, sourceSport: string, conf
   for (let offset = 0; offset <= 10_000; offset += PAGE_SIZE) {
     const query = new URLSearchParams({ closed: "true", limit: String(PAGE_SIZE), offset: String(offset), tag_id: tagId,
       related_tags: "true", end_date_min: config.start.toISOString(), end_date_max: config.end.toISOString() });
-    const page = await fetchJson<GammaMarketRaw[]>(`${GAMMA_API}/markets?${query}`); if (!Array.isArray(page)) break;
+    let page: GammaMarketRaw[];
+    try {
+      page = await fetchJson<GammaMarketRaw[]>(`${GAMMA_API}/markets?${query}`);
+    } catch {
+      break; // 422 offset-too-large or rate limit — stop pagination
+    }
+    if (!Array.isArray(page)) break;
     for (const raw of page) { const market = normalizeMarket(raw, sourceSport, config); if (market) rows.push(market); }
     if (page.length < PAGE_SIZE) break;
   }
