@@ -2,7 +2,8 @@
 import { prisma } from "../lib/db.js";
 import { hourlyPnl, closePaperTrade } from "../lib/paper.js";
 import { getExecutableSellQuote } from "../adapters/polymarket.js";
-import { DEFAULT_RULES, categoryFromSlug } from "../lib/scoring.js";
+import { DEFAULT_RULES } from "../lib/scoring.js";
+import { walletCopyCategory } from "../lib/walletCopyCategory.js";
 
 export async function runPaperUpdatePnl(): Promise<void> {
   const activeRs = await prisma.ruleSet.findFirst({ where: { active: true }, orderBy: { version: "desc" } });
@@ -55,9 +56,7 @@ export async function runPaperUpdatePnl(): Promise<void> {
     const lossFrac = updated.unrealizedPnl / cashInvested;
 
     const isCalendarBasket = pt.walletAddress.startsWith("STRATEGY:calendar_arb:");
-    const isSportsWalletCopy = pt.source === "wallet_copy" && categoryFromSlug(pt.slug) === "sports";
-    // Binary sports prices can swing violently and recover. Wallet behavior, validity, and
-    // resolution are the primary exits; a generic mark-to-market stop was destroying optionality.
+    const isSportsWalletCopy = pt.source === "wallet_copy" && walletCopyCategory(pt.slug) === "sports";
     const useGenericStop = !isCalendarBasket && !isSportsWalletCopy;
     if (useGenericStop && lossFrac < -rules.stopLossPct) {
       const closed = closePaperTrade(trade, quote.netPrice);
