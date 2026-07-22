@@ -18,6 +18,7 @@ interface StepResult {
 }
 
 const steps: [string, () => Promise<void>, boolean][] = [
+  ["update:rules", runUpdateRules, true],              // FIRST: sync DB rules before scoring
   ["scan:leaderboard", runScanLeaderboard, true],
   ["scan:wallets", runScanWallets, true],
   ["monitor:trades", runMonitorTrades, true],
@@ -26,7 +27,6 @@ const steps: [string, () => Promise<void>, boolean][] = [
   ["scan:calendar", async () => { await runScanCalendarArbitrage(); }, false],
   ["paper:update-pnl", runPaperUpdatePnl, false],
   ["review:outcomes", runReviewOutcomes, false],
-  ["update:rules", runUpdateRules, false],
   ["report:daily", runReportDaily, false],
 ];
 
