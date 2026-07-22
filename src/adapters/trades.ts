@@ -28,6 +28,8 @@ export interface TradesOpts {
 function fillIdentity(t: any): string {
   const raw = [
     String(t.transactionHash ?? ""),
+    String(t.proxyWallet ?? ""),
+    String(t.conditionId ?? ""),
     String(t.asset ?? ""),
     String(t.side ?? ""),
     Number(t.price ?? 0).toFixed(8),
