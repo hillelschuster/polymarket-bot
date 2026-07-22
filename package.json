@@ -22,6 +22,7 @@
     "report:daily": "tsx src/jobs/reportDaily.ts",
     "pipeline": "tsx src/jobs/runAll.ts",
     "backtest": "tsx src/jobs/backtest.ts",
+    "backtest:sports": "tsx src/jobs/backtestSportsFavorites.ts",
     "loop": "tsx src/jobs/loop.ts",
     "generate": "prisma generate",
     "test": "vitest run"
