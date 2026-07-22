@@ -18,6 +18,20 @@ import * as path from "path";
 
 const DATA_DIR = path.join(process.cwd(), "data");
 const SHADOW_FILE = path.join(DATA_DIR, "laneb_shadow.json");
+const MAX_OPPORTUNITIES = 500; // prune old resolved entries to prevent unbounded growth
+const FETCH_TIMEOUT_MS = 15_000; // prevent hanging on slow API responses
+const MAX_RESOLUTION_CHECKS_PER_PASS = 10; // limit API calls for resolution checks
+
+/** fetchJson with timeout wrapper */
+async function safeFetch<T>(url: string): Promise<T> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
+  try {
+    return await fetchJson<T>(url, { signal: controller.signal });
+  } finally {
+    clearTimeout(timer);
+  }
+}
 
 // --- Types ---
 interface ShadowOpportunity {
@@ -90,13 +104,13 @@ async function getActiveSportsMarkets(): Promise<any[]> {
     order: "volume24hr",
     ascending: "false",
   });
-  const markets = await fetchJson<any[]>(`${GAMMA_API}/markets?${qs}`);
+  const markets = await safeFetch<any[]>(`${GAMMA_API}/markets?${qs}`);
   return markets.filter((m: any) => isSportsSlug(m.slug));
 }
 
 async function getOrderBookEdges(tokenId: string): Promise<{ bestAsk: number | null; bestBid: number | null; spread: number | null }> {
   try {
-    const book = await fetchJson<any>(`${CLOB_API}/book?token_id=${tokenId}`);
+    const book = await safeFetch<any>(`${CLOB_API}/book?token_id=${tokenId}`);
     const asks = (book.asks ?? []).map((x: any) => Number(x.price)).filter(Number.isFinite).sort((a: number, b: number) => a - b);
     const bids = (book.bids ?? []).map((x: any) => Number(x.price)).filter(Number.isFinite).sort((a: number, b: number) => b - a);
     const bestAsk = asks[0] ?? null;
@@ -110,7 +124,7 @@ async function getOrderBookEdges(tokenId: string): Promise<{ bestAsk: number | n
 async function getWalletTradesForMarket(conditionId: string): Promise<{ wallet: string; price: number; size: number; time: string; side: string }[]> {
   try {
     const qs = new URLSearchParams({ market: conditionId, limit: "50" });
-    const trades = await fetchJson<any[]>(`${DATA_API}/trades?${qs}`);
+    const trades = await safeFetch<any[]>(`${DATA_API}/trades?${qs}`);
     return trades.map((t: any) => ({
       wallet: t.proxyWallet ?? "",
       price: Number(t.price ?? 0),
@@ -212,15 +226,14 @@ export async function runLaneBScan(): Promise<void> {
     console.log(`  NEW: ${slug} | ask=${edges.bestAsk.toFixed(3)} | return=${((theoreticalReturn ?? 0) * 100).toFixed(1)}% | ${buysAfterFinish.length} wallet buys after finish`);
   }
 
-  // 2. Check if any previously detected opportunities have resolved
+  // 2. Check if any previously detected opportunities have resolved (capped per pass)
   let newResolutions = 0;
-  for (const opp of log.opportunities) {
-    if (opp.status !== "detected") continue;
-
+  const pendingResolution = log.opportunities.filter((o) => o.status === "detected").slice(0, MAX_RESOLUTION_CHECKS_PER_PASS);
+  for (const opp of pendingResolution) {
     // Check if market is now closed
     try {
       const qs = new URLSearchParams({ slug: opp.slug, limit: "1" });
-      const arr = await fetchJson<any[]>(`${GAMMA_API}/markets?${qs}`);
+      const arr = await safeFetch<any[]>(`${GAMMA_API}/markets?${qs}`);
       await new Promise((r) => setTimeout(r, 200));
       const mkt = arr[0];
       if (!mkt) continue;
@@ -240,7 +253,17 @@ export async function runLaneBScan(): Promise<void> {
     } catch { /* skip */ }
   }
 
-  // 3. Update stats
+  // 3. Prune old resolved opportunities to prevent unbounded growth
+  const resolvedOpps = log.opportunities.filter((o) => o.status.startsWith("resolved"));
+  if (log.opportunities.length > MAX_OPPORTUNITIES && resolvedOpps.length > 50) {
+    // Keep all detected + most recent 50 resolved
+    const detected = log.opportunities.filter((o) => o.status === "detected");
+    const recentResolved = resolvedOpps.slice(-50);
+    log.opportunities = [...detected, ...recentResolved];
+    console.log(`  Pruned to ${log.opportunities.length} entries (was ${detected.length + resolvedOpps.length})`);
+  }
+
+  // 4. Update stats
   const resolved = log.opportunities.filter((o) => o.status.startsWith("resolved"));
   const wins = resolved.filter((o) => o.status === "resolved_win");
   log.stats = {
@@ -255,7 +278,8 @@ export async function runLaneBScan(): Promise<void> {
   console.log(`  Done: ${newDetections} new, ${newResolutions} resolved. Total: ${log.stats.totalDetected} detected, ${log.stats.totalResolved} resolved, ${Math.round(log.stats.winRate * 100)}% win rate`);
 }
 
-// Run once if called directly
-if (require.main === module) {
+// Run once if called directly (ESM-compatible)
+const isMain = process.argv[1]?.replace(/\\/g, "/").endsWith("laneBShadow.ts") ?? false;
+if (isMain) {
   runLaneBScan().catch(console.error);
 }
