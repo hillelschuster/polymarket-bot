@@ -54,7 +54,7 @@ function configFromEnv(): Config {
 function sportMatches(metadataSport: string, wanted: string): boolean {
   const value = metadataSport.toLowerCase();
   if (wanted === "mlb") return value === "mlb" || value.includes("major league baseball") || value === "baseball";
-  if (wanted === "tennis") return value.includes("tennis");
+  if (wanted === "tennis") return value.includes("tennis") || ["atp", "wta", "itf"].includes(value);
   return value === wanted || value.includes(wanted);
 }
 function classifySport(slug: string, sourceSport: string): string | null {
