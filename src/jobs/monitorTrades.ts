@@ -48,11 +48,16 @@ export async function runMonitorTrades(): Promise<void> {
     orderBy: [{ status: "asc" }, { globalScore: "desc" }, { sourceRank: "asc" }],
   });
   const track = profiles.filter((wallet) => wallet.status === "track");
-  // The main loop normally runs every 15 minutes. Watch-list exploration runs once per
-  // four slots so uncertain wallets remain observable without slowing the core signal path.
   const scanWatch = Math.floor(Date.now() / (15 * 60 * 1000)) % 4 === 0;
-  const watch = scanWatch
-    ? profiles.filter((wallet) => wallet.status === "watch").slice(0, WATCH_WALLETS_PER_HOURLY_PASS)
+  const watchPool = profiles.filter((wallet) => wallet.status === "watch");
+  const watchOffset = watchPool.length
+    ? (Math.floor(Date.now() / (60 * 60 * 1000)) * WATCH_WALLETS_PER_HOURLY_PASS) % watchPool.length
+    : 0;
+  const watch = scanWatch && watchPool.length
+    ? Array.from(
+        { length: Math.min(WATCH_WALLETS_PER_HOURLY_PASS, watchPool.length) },
+        (_, index) => watchPool[(watchOffset + index) % watchPool.length],
+      )
     : [];
   const eligible = [...track, ...watch];
 
@@ -91,7 +96,6 @@ export async function runMonitorTrades(): Promise<void> {
         for (const trade of rows) fresh.set(trade.id, trade);
         if (rows.length < PAGE_SIZE) break;
         const oldest = Math.min(...rows.map((trade) => trade.timestamp));
-        // Fetch the page containing the watermark so same-second fills are still captured.
         if (watermarkSec > 0 && oldest < watermarkSec) break;
       }
 
@@ -106,8 +110,6 @@ export async function runMonitorTrades(): Promise<void> {
       const existingSignatures = new Set(existingRows.map((row) => fillSignature(row)));
 
       for (const trade of ordered) {
-        // One-time compatibility with the former transaction-hash IDs: do not replay an
-        // already-recorded fill merely because its improved deterministic ID is different.
         const signature = fillSignature(trade);
         if (existingSignatures.has(signature) && !existingRows.some((row) => row.id === trade.id)) continue;
         const slug = trade.slug;
