@@ -1,8 +1,23 @@
 // Job: score:trades. Score new trades -> DecisionJournal (+ PaperTrade on copy). SPEC §10.
 import { prisma } from "../lib/db.js";
-import { scoreTrade, DEFAULT_RULES, walletCopySkipReason, type TradeInput } from "../lib/scoring.js";
+import { scoreTrade, DEFAULT_RULES, walletCopySkipReason, categoryFromSlug, type TradeInput } from "../lib/scoring.js";
 import { createPaperTrade } from "../lib/paper.js";
-import { getMarketBySlug } from "../adapters/polymarket.js";
+import { getMarketBySlug, getExecutableBuyQuote } from "../adapters/polymarket.js";
+
+/**
+ * Parse resolution date from sports slugs like "mlb-wsh-col-2026-07-21".
+ * Returns days from now until end-of-game-day (assumes games end by 05:00 UTC next day).
+ * Falls back to 30 days if no date found in slug.
+ */
+function daysToResolutionFromSlug(slug: string | null): number {
+  if (!slug) return 30;
+  const match = slug.match(/(\d{4}-\d{2}-\d{2})/);
+  if (!match) return 30;
+  // Sports games on date X resolve by ~05:00 UTC on X+1
+  const gameDate = new Date(match[1] + "T05:00:00Z");
+  gameDate.setDate(gameDate.getDate() + 1);
+  return (gameDate.getTime() - Date.now()) / 86_400_000;
+}
 
 export async function runScoreTrades(): Promise<void> {
   // Use the active (self-improved) ruleset so updateRules' learning actually reaches
@@ -86,6 +101,7 @@ export async function runScoreTrades(): Promise<void> {
   };
 
   let copied = 0;
+  const copiedSlugs = new Set<string>(); // dedup: max 1 copy per market
   for (const ot of unscored) {
     const walletGlobalScore = ot.wallet?.globalScore ?? 50;
 
@@ -119,7 +135,9 @@ export async function runScoreTrades(): Promise<void> {
     const currentPrice = priceOf(ot.slug, ot.tokenId) ?? ot.detectedPrice ?? 0.5;
     const detectedPrice = ot.detectedPrice ?? currentPrice;
     const priceMovementSinceEntry = currentPrice - detectedPrice; // +ve = already moved in our favor => late
-    const daysToResolution = m?.endDate ? (new Date(m.endDate).getTime() - Date.now()) / 86_400_000 : 30;
+    const daysToResolution = m?.endDate
+      ? (new Date(m.endDate).getTime() - Date.now()) / 86_400_000
+      : daysToResolutionFromSlug(ot.slug);
     const volume = m?.volume ?? 0;
 
     // The market-variable "equation" (scoreTradeByMarket) is the PRIMARY selector and
@@ -134,6 +152,7 @@ export async function runScoreTrades(): Promise<void> {
       timeToResolution: daysToResolution,
       currentPrice,
       side: ot.side ?? "BUY",
+      category: ot.marketCategory ?? categoryFromSlug(ot.slug) ?? undefined,
     };
     const result = scoreTrade(input, rules);
     const dj = await prisma.decisionJournal.create({
@@ -148,17 +167,37 @@ export async function runScoreTrades(): Promise<void> {
       },
     });
     if (result.decision === "paper_copy") {
+      // Dedup: max 1 copy per market slug (prevents correlated double-bets on same game)
+      if (ot.slug && copiedSlugs.has(ot.slug)) {
+        await prisma.decisionJournal.update({
+          where: { id: dj.id },
+          data: { decision: "skip", copyScore: 0, reasonsJson: JSON.stringify(["already copied this market (dedup)"]) },
+        });
+        continue;
+      }
+
+      // Fetch executable CLOB entry (real ask + fees), not Gamma midpoint
+      let executableEntry = currentPrice;
+      let clobMeta: { bestAsk?: number; allInPrice?: number; fee?: number; spread?: number } = {};
+      if (ot.tokenId) {
+        try {
+          const quote = await getExecutableBuyQuote(ot.tokenId, 15); // $15 budget sample
+          if (quote) {
+            executableEntry = quote.allInPrice;
+            clobMeta = { bestAsk: quote.bestAsk, allInPrice: quote.allInPrice, fee: quote.fee, spread: quote.spread ?? undefined };
+          }
+        } catch { /* fall back to midpoint */ }
+      }
+
       // Conviction-scaled sizing: proven (wallet, side) winners (positive avg copy
       // PnL over enough samples) get a larger paper size (up to $20); unproven stay $5.
-      // This amplifies the pairs the copy-performance filter has validated, and limits
-      // exposure to unproven ones — directly leveraging good wallets per the strategy.
       let confidence = result.score / 100;
       if (perf && perf.count >= rules.minWalletCopyCount && perf.avgPnl > 0) {
         confidence = Math.min(1, 0.6 + perf.avgPnl * 3);
       }
-      // Paper entry = live price at copy time (we execute now, not at the wallet's historical fill).
+      // Paper entry = executable all-in price (ask + fees), not Gamma midpoint.
       const pt = createPaperTrade(
-        { walletAddress: ot.walletAddress, marketId: ot.marketId, outcome: ot.outcome ?? "YES", side: ot.side ?? "BUY", entryPrice: currentPrice },
+        { walletAddress: ot.walletAddress, marketId: ot.marketId, outcome: ot.outcome ?? "YES", side: ot.side ?? "BUY", entryPrice: executableEntry },
         confidence,
       );
       await prisma.paperTrade.create({
@@ -179,7 +218,9 @@ export async function runScoreTrades(): Promise<void> {
           openedAt: new Date(pt.openedAt),
         },
       });
+      if (ot.slug) copiedSlugs.add(ot.slug);
       copied++;
+      console.log(`  COPY: ${ot.slug?.slice(0, 35)} @ ${executableEntry.toFixed(4)} (ask=${clobMeta.bestAsk?.toFixed(3) ?? "?"} fee=${clobMeta.fee?.toFixed(4) ?? "?"})`);
     }
   }
   console.log(`scoreTrades done: ${unscored.length} scored, ${copied} paper_copy`);
