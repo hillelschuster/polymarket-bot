@@ -1,6 +1,7 @@
 // Job: scan:wallets. Rank wallet opportunity quality without letting temporary open PnL kill alpha.
 import { prisma } from "../lib/db.js";
-import { scoreWallet, DEFAULT_RULES, categoryFromSlug, type WalletInput } from "../lib/scoring.js";
+import { scoreWallet, DEFAULT_RULES, type WalletInput } from "../lib/scoring.js";
+import { walletCopyCategory } from "../lib/walletCopyCategory.js";
 import { getLeaderboard } from "../adapters/leaderboard.js";
 import { getWalletTrades } from "../adapters/trades.js";
 import { getMarketBySlug } from "../adapters/polymarket.js";
@@ -124,7 +125,7 @@ export async function runScanWallets(): Promise<void> {
           const side = (trade.side ?? "BUY").toUpperCase();
           const favorable = side === "SELL" ? entry - current : current - entry;
           const endTime = market.endDate ? new Date(market.endDate).getTime() : NaN;
-          const category = categoryFromSlug(trade.slug) ?? market.category;
+          const category = walletCopyCategory(trade.slug, market.category);
 
           if (Number.isNaN(endTime) || endTime >= now) {
             openCount++;
@@ -194,7 +195,6 @@ export async function runScanWallets(): Promise<void> {
       const copyRoi = evidence && evidence.stake > 0 ? (evidence.pnl / evidence.stake) * 100 : 0;
       const copyWin = evidence?.count ? evidence.wins / evidence.count : 0;
 
-      // Only materially negative realized evidence removes a wallet. Uncertainty stays observable.
       let status: "track" | "watch" | "ignore";
       if (tier === "DROP") status = "ignore";
       else if (tier === "A" || tier === "B" || score.global >= 20) status = "track";
@@ -206,7 +206,7 @@ export async function runScanWallets(): Promise<void> {
         data: {
           globalScore: score.global,
           scoreComponentsJson: JSON.stringify(score.components),
-          lastScannedAt: new Date(),
+          lastScannedAt: shouldEnrich ? new Date() : profile.lastScannedAt,
           status,
           roi30d: lb?.roi ?? profile.roi30d,
           tradeCount30d: input.tradeCount30d,
