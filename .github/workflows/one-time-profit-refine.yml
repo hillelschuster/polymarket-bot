@@ -1,0 +1,168 @@
+name: One-time profit signal refinement
+
+on:
+  push:
+    branches:
+      - profit/signal-roi-upgrade-20260723
+    paths:
+      - .github/workflows/one-time-profit-refine.yml
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: profit/signal-roi-upgrade-20260723
+          fetch-depth: 0
+
+      - name: Apply reviewed signal refinements
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          path = Path("src/jobs/scoreTrades.ts")
+          text = path.read_text()
+
+          replacements = [
+              (
+                  'const NON_SPORTS_MAX_AGE_MS = 20 * 60 * 1000;\nconst SPORTS_MAX_AGE_MS = 45 * 60 * 1000;',
+                  'const NON_SPORTS_AGE_SCALE_MS = 20 * 60 * 1000;\nconst SPORTS_AGE_SCALE_MS = 45 * 60 * 1000;\nconst MAX_SIGNAL_RETENTION_MS = 24 * 60 * 60 * 1000;',
+              ),
+              (
+                  'async function writeDecision(observed: any, decision: string, reasons: string[], score = 0, size?: number): Promise<void> {\n  await prisma.decisionJournal.create({',
+                  'let decisionWriteTail: Promise<unknown> = Promise.resolve();\n\nasync function writeDecision(observed: any, decision: string, reasons: string[], score = 0, size?: number): Promise<void> {\n  const result = decisionWriteTail.then(() => prisma.decisionJournal.create({',
+              ),
+              (
+                  '      walletQualityScore: observed.wallet?.globalScore ?? 50,\n    },\n  });\n}',
+                  '      walletQualityScore: observed.wallet?.globalScore ?? 50,\n    },\n  }));\n  decisionWriteTail = result.then(() => undefined, () => undefined);\n  await result;\n}',
+              ),
+              (
+                  '''  const freshWalletsByToken = new Map<string, Set<string>>();
+          for (const trade of buys) {
+            if (!trade.tokenId) continue;
+            const wallet = trade.walletAddress.toLowerCase();
+            const tier = tierFor(walletPerf.get(wallet), trade.wallet?.globalScore ?? 35);
+            if (tier === "DROP") continue;
+            const wallets = freshWalletsByToken.get(trade.tokenId) ?? new Set<string>();
+            wallets.add(wallet);
+            freshWalletsByToken.set(trade.tokenId, wallets);
+          }
+          ''',
+                  '''  const freshWalletsByToken = new Map<string, Set<string>>();
+          for (const trade of buys) {
+            if (!trade.tokenId || !trade.timestamp) continue;
+            const market = trade.slug ? marketBySlug.get(trade.slug) : null;
+            const category = walletCopyCategory(trade.slug, trade.marketCategory ?? market?.category);
+            const consensusWindow = category === "sports" ? SPORTS_AGE_SCALE_MS : NON_SPORTS_AGE_SCALE_MS;
+            const age = Math.max(0, Date.now() - trade.timestamp.getTime());
+            if (age > consensusWindow || (market && (market.closed || !market.active || !market.acceptingOrders))) continue;
+            const wallet = trade.walletAddress.toLowerCase();
+            const tier = tierFor(walletPerf.get(wallet), trade.wallet?.globalScore ?? 35);
+            if (tier === "DROP") continue;
+            const wallets = freshWalletsByToken.get(trade.tokenId) ?? new Set<string>();
+            wallets.add(wallet);
+            freshWalletsByToken.set(trade.tokenId, wallets);
+          }
+          ''',
+              ),
+              (
+                  '''    const isSports = category === "sports";
+              const maxAge = isSports ? SPORTS_MAX_AGE_MS : NON_SPORTS_MAX_AGE_MS;
+              const signalAge = observed.timestamp ? Math.max(0, Date.now() - observed.timestamp.getTime()) : Infinity;
+              if (signalAge > maxAge) {
+                await writeDecision(observed, "skip", [`signal age ${(signalAge / 60000).toFixed(0)}min exceeds opportunity window ${(maxAge / 60000).toFixed(0)}min`]);
+                skipped++;
+                return null;
+              }
+          ''',
+                  '''    const isSports = category === "sports";
+              const ageScale = isSports ? SPORTS_AGE_SCALE_MS : NON_SPORTS_AGE_SCALE_MS;
+              const signalAge = observed.timestamp ? Math.max(0, Date.now() - observed.timestamp.getTime()) : Infinity;
+              if (signalAge > MAX_SIGNAL_RETENTION_MS) {
+                await writeDecision(observed, "skip", [`signal is ${(signalAge / 3_600_000).toFixed(1)}h old; no longer part of a fresh wallet campaign`]);
+                skipped++;
+                return null;
+              }
+          ''',
+              ),
+              (
+                  '''      const hours = market?.endDate
+                    ? (new Date(market.endDate).getTime() - Date.now()) / 3_600_000
+                    : hoursToResolutionFromSlug(observed.slug);
+          ''',
+                  '      const hours = sportsHoursToResolution(market?.endDate, observed.slug);\n',
+              ),
+              (
+                  '''    const categoryEvidenceScore = categoryEvidence?.count
+                    ? clamp(50 + perfRoi(categoryEvidence) * 2 + (perfWinRate(categoryEvidence) - 0.5) * 60, 20, 95)
+                    : 50;
+          ''',
+                  '''    let publicCategoryStrength: number | null = null;
+              if (category && observed.wallet?.categoryStrengthsJson) {
+                try {
+                  const publicCategories = JSON.parse(observed.wallet.categoryStrengthsJson) as Record<string, number>;
+                  const value = Number(publicCategories[category]);
+                  if (Number.isFinite(value)) publicCategoryStrength = clamp(value, 0, 1);
+                } catch { /* malformed historical metadata: keep neutral prior */ }
+              }
+              const categoryEvidenceScore = categoryEvidence?.count
+                ? clamp(50 + perfRoi(categoryEvidence) * 2 + (perfWinRate(categoryEvidence) - 0.5) * 60, 20, 95)
+                : publicCategoryStrength != null ? publicCategoryStrength * 100 : 50;
+          ''',
+              ),
+              (
+                  'const delayScore = clamp(100 * (1 - signalAge / maxAge), 0, 100);',
+                  'const delayScore = clamp(100 / (1 + signalAge / ageScale), 0, 100);',
+              ),
+          ]
+
+          helper = '''
+          function sportsHoursToResolution(endDate: string | null | undefined, slug: string | null): number | null {
+            const direct = endDate ? (new Date(endDate).getTime() - Date.now()) / 3_600_000 : null;
+            if (direct != null && Number.isFinite(direct)
+                && direct >= SPORTS_MIN_HOURS_TO_RESOLUTION
+                && direct <= SPORTS_MAX_DAYS_TO_RESOLUTION * 24) {
+              return direct;
+            }
+            // Gamma sports endDate often represents scheduled game start. Once play begins it can
+            // turn negative even though the market remains live; use the slug date rather than
+            // suppressing a still-executable in-game wallet signal.
+            return hoursToResolutionFromSlug(slug);
+          }
+          '''
+          anchor = '''function hoursToResolutionFromSlug(slug: string | null): number | null {
+            if (!slug) return null;
+            const match = slug.match(/(\\d{4}-\\d{2}-\\d{2})/);
+            if (!match) return null;
+            const gameEnd = new Date(match[1] + "T05:00:00Z");
+            gameEnd.setDate(gameEnd.getDate() + 1);
+            return (gameEnd.getTime() - Date.now()) / 3_600_000;
+          }
+          '''
+
+          if anchor not in text:
+              raise SystemExit("sports timing anchor not found")
+          text = text.replace(anchor, anchor + helper, 1)
+
+          for old, new in replacements:
+              if old not in text:
+                  raise SystemExit(f"required scoreTrades pattern not found: {old[:100]!r}")
+              text = text.replace(old, new, 1)
+
+          path.write_text(text)
+          PY
+
+      - name: Commit refined signal engine and remove one-time workflow
+        shell: bash
+        run: |
+          git config user.name "hillelschuster"
+          git config user.email "204508909+hillelschuster@users.noreply.github.com"
+          git rm .github/workflows/one-time-profit-refine.yml
+          git add src/jobs/scoreTrades.ts
+          git commit -m "refine: preserve live sports and truthful consensus"
+          git push origin HEAD:profit/signal-roi-upgrade-20260723
