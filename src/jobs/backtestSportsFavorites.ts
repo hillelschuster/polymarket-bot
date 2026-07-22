@@ -40,7 +40,6 @@ interface DataTradeRaw {
   size?: number | string;
   price?: number | string;
   timestamp?: number | string;
-  transactionHash?: string;
 }
 
 interface CandidateMarket {
@@ -113,9 +112,11 @@ function sportMatches(metadataSport: string, wanted: string): boolean {
 
 function classifySport(slug: string, sourceSport: string): string | null {
   const value = slug.toLowerCase();
-  if (value.startsWith("mlb-")) return "mlb";
-  if (value.startsWith("tennis-") || value.startsWith("atp-") || value.startsWith("wta-")) return "tennis";
-  return sourceSport === "baseball" ? null : sourceSport;
+  if (sourceSport === "mlb") return value.startsWith("mlb-") ? "mlb" : null;
+  if (sourceSport === "tennis") {
+    return value.startsWith("tennis-") || value.startsWith("atp-") || value.startsWith("wta-") ? "tennis" : null;
+  }
+  return value.startsWith(`${sourceSport}-`) ? sourceSport : null;
 }
 
 function parseTerminalWinner(prices: number[]): number | null {
@@ -187,8 +188,6 @@ async function fetchClosedMarketsForTag(tagId: string, sourceSport: string, conf
       related_tags: "true",
       end_date_min: config.start.toISOString(),
       end_date_max: config.end.toISOString(),
-      order: "endDate",
-      ascending: "true",
     });
     const page = await fetchJson<GammaMarketRaw[]>(`${GAMMA_API}/markets?${query}`);
     if (!Array.isArray(page)) break;
@@ -222,17 +221,14 @@ async function fetchTradeWindow(conditionId: string, start: number, end: number,
   });
   const raw = await fetchJson<DataTradeRaw[]>(`${DATA_API}/trades?${query}`);
   if (!Array.isArray(raw)) return [];
-  if (raw.length >= TRADE_LIMIT && depth < 8 && end - start > 60) {
+  if (raw.length >= TRADE_LIMIT) {
+    if (depth >= 8 || end - start <= 60) throw new Error("trade window exceeds 10,000 rows after splitting");
     const middle = Math.floor((start + end) / 2);
     const [left, right] = await Promise.all([
       fetchTradeWindow(conditionId, start, middle, depth + 1),
       fetchTradeWindow(conditionId, middle + 1, end, depth + 1),
     ]);
-    const unique = new Map<string, HistoricalTrade>();
-    for (const trade of [...left, ...right]) {
-      unique.set(`${trade.timestamp}|${trade.asset}|${trade.side}|${trade.price}|${trade.size}`, trade);
-    }
-    return [...unique.values()].sort((a, b) => a.timestamp - b.timestamp);
+    return [...left, ...right].sort((a, b) => a.timestamp - b.timestamp);
   }
   return raw.map(normalizeTrade).filter((x): x is HistoricalTrade => x != null).sort((a, b) => a.timestamp - b.timestamp);
 }
@@ -279,10 +275,11 @@ function printSummary(label: string, rows: BacktestRow[]): void {
 
 async function main(): Promise<void> {
   const config = configFromEnv();
-  console.log("Sports favorites backtest: fixed 60-minute pregame entry, historical taker-print execution proxy");
+  console.log(`Sports favorites backtest: fixed ${config.entryMinutesBeforeStart}-minute pregame entry, historical taker-print execution proxy`);
   console.log(JSON.stringify({ ...config, start: config.start.toISOString(), end: config.end.toISOString() }, null, 2));
 
   const metadata = await fetchJson<SportsMetadata[]>(`${GAMMA_API}/sports`);
+  if (!Array.isArray(metadata)) throw new Error("Gamma /sports returned invalid data");
   const tagSources: { tagId: string; sport: string }[] = [];
   for (const wanted of config.sports) {
     const matching = metadata.filter((row) => sportMatches(String(row.sport ?? ""), wanted));
@@ -402,7 +399,7 @@ async function main(): Promise<void> {
       discovery: "all closed MLB/tennis moneyline markets from Gamma sports tags",
       entry: `${config.entryMinutesBeforeStart} minutes before eventStartTime`,
       referencePrice: `last trade for both outcome tokens within ${config.maxPriceAgeMinutes} minutes before entry`,
-      execution: `subsequent taker BUY prints for ${config.fillWindowSeconds}s, one extra tick slippage, exact historical feeSchedule when present`,
+      execution: `subsequent taker BUY prints for ${config.fillWindowSeconds}s, one extra tick slippage, market feeSchedule when present`,
       limitations: [
         "trade prints do not reconstruct historical order-book depth",
         "tests direct pregame favorite bias, not wallet-selection alpha",
