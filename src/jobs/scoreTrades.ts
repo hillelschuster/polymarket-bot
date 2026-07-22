@@ -386,7 +386,7 @@ export async function runScoreTrades(): Promise<void> {
     let actualDays = market?.endDate
       ? (new Date(market.endDate).getTime() - Date.now()) / 86_400_000
       : 30;
-    let scoringDays = actualDays;
+    let scoringDays = Math.max(actualDays, rules.minDaysToResolution);
     if (isSports) {
       const hours = market?.endDate
         ? (new Date(market.endDate).getTime() - Date.now()) / 3_600_000
@@ -412,13 +412,19 @@ export async function runScoreTrades(): Promise<void> {
       return null;
     }
 
+    const scoringLiquidity = rules.maxMarketLiquidity > 0
+      ? Math.min(liquidity, rules.maxMarketLiquidity)
+      : liquidity;
+    const scoringVolume = scoringLiquidity > 0
+      ? Math.min(volume, scoringLiquidity * rules.toxicRatio)
+      : volume;
     const marketResult = scoreTradeByMarket({
       side: "BUY",
       currentPrice: midpoint,
-      priceMovementSinceEntry: midpoint - detectedPrice,
+      priceMovementSinceEntry: Math.max(0, midpoint - detectedPrice),
       spread,
-      liquidity,
-      volume,
+      liquidity: scoringLiquidity,
+      volume: scoringVolume,
       daysToResolution: scoringDays,
       detectedPrice,
     }, rules);
