@@ -1,222 +1,373 @@
 /**
  * RESEARCH MODULE — Consensus Analysis
- * 
- * Analyzes observed trades for multi-wallet agreement patterns.
- * When 2+ tracked wallets bet the same token within a time window,
- * does that correlate with better outcomes? READ-ONLY.
- * 
+ * READ-ONLY: analyzes observed wallet BUY campaigns and paper-copy outcomes.
  * Usage: npx tsx src/research/consensusAnalysis.ts
  */
+import { pathToFileURL } from "node:url";
+import * as path from "node:path";
 import { prisma } from "../lib/db.js";
 
-const CONSENSUS_WINDOW_MS = 10 * 60 * 1000; // 10 minutes
+const PRIMARY_WINDOW_MINUTES = 20;
+const PRIMARY_WINDOW_MS = PRIMARY_WINDOW_MINUTES * 60 * 1000;
+const CAMPAIGN_GAP_MS = PRIMARY_WINDOW_MS;
+const COPY_MATCH_BEFORE_MS = 5 * 60 * 1000;
+const COPY_MATCH_AFTER_MS = 30 * 60 * 1000;
+const SENSITIVITY_WINDOWS_MINUTES = [5, 10, 20, 30];
+const EPSILON = 0.005;
 
-interface SignalGroup {
+interface ObservedBuy {
+  id: string;
+  walletAddress: string;
+  tokenId: string | null;
+  slug: string | null;
+  detectedPrice: number | null;
+  size: number | null;
+  timestamp: Date | null;
+  marketId: string;
+}
+
+interface PaperCopy {
+  id: string;
+  tokenId: string | null;
+  openedAt: Date;
+  status: string;
+  realizedPnl: number | null;
+  unrealizedPnl: number | null;
+}
+
+interface WalletSignal {
+  walletAddress: string;
+  firstAt: Date;
+  lastAt: Date;
+  fillCount: number;
+  totalShares: number;
+  weightedAveragePrice: number | null;
+}
+
+export interface ConsensusCampaign {
+  id: string;
   tokenId: string;
   slug: string;
-  wallets: string[];
-  timestamps: Date[];
-  prices: number[];
-  sizes: number[];
-  windowMs: number; // time between first and last signal
+  startAt: string;
+  endAt: string;
+  walletSignals: WalletSignal[];
   walletCount: number;
-  // Outcome (if we have a paper trade for this)
+  fillCount: number;
+  confirmationDelayMinutes: number | null;
+  isConsensus: boolean;
+  isLateAgreement: boolean;
+  scaleInWallets: number;
   hasCopy: boolean;
+  copyCount: number;
+  copyStatus: "resolved" | "open" | "mixed" | null;
   copyPnl: number | null;
-  copyStatus: string | null;
 }
 
-async function main() {
-  console.log("=== CONSENSUS ANALYSIS ===\n");
-  console.log(`Window: ${CONSENSUS_WINDOW_MS / 60000} minutes\n`);
+export interface ConsensusResult {
+  generatedAt: string;
+  primaryWindowMinutes: number;
+  campaigns: ConsensusCampaign[];
+  consensusEvents: number;
+  lateAgreementEvents: number;
+  soloEvents: number;
+  consensusCopied: number;
+  consensusMissed: number;
+  consensusResolvedCopies: number;
+  consensusResolvedPnl: number;
+  consensusResolvedWinRate: number;
+  soloResolvedCopies: number;
+  soloResolvedPnl: number;
+  soloResolvedWinRate: number;
+  scaleInCampaigns: number;
+  sensitivity: { windowMinutes: number; consensusEvents: number }[];
+  topPairs: { walletA: string; walletB: string; sharedCampaigns: number }[];
+}
 
-  // Get all observed BUY trades with token info
-  const trades = await prisma.observedTrade.findMany({
-    where: {
-      side: "BUY",
-      tokenId: { not: null },
-      slug: { not: null },
-    },
-    orderBy: { timestamp: "asc" },
-    select: {
-      id: true,
-      walletAddress: true,
-      tokenId: true,
-      slug: true,
-      detectedPrice: true,
-      size: true,
-      timestamp: true,
-      marketId: true,
-    },
-  });
+function round(value: number, digits = 2): number {
+  const factor = 10 ** digits;
+  return Math.round(value * factor) / factor;
+}
 
-  console.log(`Total BUY signals with tokenId: ${trades.length}\n`);
+function tradeFingerprint(trade: ObservedBuy): string {
+  return [
+    trade.walletAddress.toLowerCase(),
+    trade.tokenId,
+    trade.timestamp?.getTime() ?? 0,
+    Number(trade.size ?? 0).toFixed(8),
+    Number(trade.detectedPrice ?? 0).toFixed(8),
+  ].join("|");
+}
 
-  // Group by tokenId
-  const byToken = new Map<string, typeof trades>();
-  for (const t of trades) {
-    if (!t.tokenId) continue;
-    const arr = byToken.get(t.tokenId) ?? [];
-    arr.push(t);
-    byToken.set(t.tokenId, arr);
+function splitCampaigns(trades: ObservedBuy[], gapMs = CAMPAIGN_GAP_MS): ObservedBuy[][] {
+  if (!trades.length) return [];
+  const sorted = [...trades].sort((a, b) => (a.timestamp?.getTime() ?? 0) - (b.timestamp?.getTime() ?? 0));
+  const campaigns: ObservedBuy[][] = [];
+  let current: ObservedBuy[] = [];
+  for (const trade of sorted) {
+    if (!trade.timestamp) continue;
+    const previous = current[current.length - 1];
+    if (previous?.timestamp && trade.timestamp.getTime() - previous.timestamp.getTime() > gapMs) {
+      campaigns.push(current);
+      current = [];
+    }
+    current.push(trade);
+  }
+  if (current.length) campaigns.push(current);
+  return campaigns;
+}
+
+function aggregateWalletSignals(trades: ObservedBuy[]): WalletSignal[] {
+  const byWallet = new Map<string, ObservedBuy[]>();
+  for (const trade of trades) {
+    const key = trade.walletAddress.toLowerCase();
+    const list = byWallet.get(key) ?? [];
+    list.push(trade);
+    byWallet.set(key, list);
   }
 
-  // Find consensus events: 2+ DIFFERENT wallets on same token within window
-  const consensusEvents: SignalGroup[] = [];
-  const soloEvents: SignalGroup[] = [];
+  return [...byWallet.entries()].map(([walletAddress, walletTrades]) => {
+    const sorted = [...walletTrades].sort((a, b) => (a.timestamp?.getTime() ?? 0) - (b.timestamp?.getTime() ?? 0));
+    const totalShares = sorted.reduce((sum, trade) => sum + Math.max(0, Number(trade.size) || 0), 0);
+    const weightedPriceNumerator = sorted.reduce((sum, trade) => {
+      const size = Math.max(0, Number(trade.size) || 0);
+      const price = Number(trade.detectedPrice);
+      return sum + (Number.isFinite(price) ? size * price : 0);
+    }, 0);
+    return {
+      walletAddress,
+      firstAt: sorted[0].timestamp!,
+      lastAt: sorted[sorted.length - 1].timestamp!,
+      fillCount: sorted.length,
+      totalShares: round(totalShares, 4),
+      weightedAveragePrice: totalShares > 0 ? round(weightedPriceNumerator / totalShares, 4) : null,
+    };
+  }).sort((a, b) => a.firstAt.getTime() - b.firstAt.getTime());
+}
 
-  for (const [tokenId, tokenTrades] of byToken.entries()) {
-    if (tokenTrades.length < 2) {
-      if (tokenTrades.length === 1) {
-        soloEvents.push({
-          tokenId,
-          slug: tokenTrades[0].slug ?? "",
-          wallets: [tokenTrades[0].walletAddress],
-          timestamps: [tokenTrades[0].timestamp!],
-          prices: [tokenTrades[0].detectedPrice ?? 0],
-          sizes: [tokenTrades[0].size ?? 0],
-          windowMs: 0,
-          walletCount: 1,
-          hasCopy: false,
-          copyPnl: null,
-          copyStatus: null,
-        });
-      }
-      continue;
-    }
+function confirmationDelayMs(walletSignals: WalletSignal[]): number | null {
+  if (walletSignals.length < 2) return null;
+  return walletSignals[1].firstAt.getTime() - walletSignals[0].firstAt.getTime();
+}
 
-    // Sort by time
-    const sorted = [...tokenTrades].sort((a, b) => (a.timestamp?.getTime() ?? 0) - (b.timestamp?.getTime() ?? 0));
+function classifyCopyStatus(statuses: string[]): "resolved" | "open" | "mixed" | null {
+  if (!statuses.length) return null;
+  if (statuses.every((status) => status === "resolved")) return "resolved";
+  if (statuses.every((status) => status === "open")) return "open";
+  return "mixed";
+}
 
-    // Sliding window: find clusters of different wallets
-    const uniqueWallets = new Set(sorted.map((t) => t.walletAddress));
-    if (uniqueWallets.size < 2) {
-      // Same wallet, multiple fills = scale-in, not consensus
-      soloEvents.push({
-        tokenId,
-        slug: sorted[0].slug ?? "",
-        wallets: [...uniqueWallets],
-        timestamps: sorted.map((t) => t.timestamp!),
-        prices: sorted.map((t) => t.detectedPrice ?? 0),
-        sizes: sorted.map((t) => t.size ?? 0),
-        windowMs: (sorted[sorted.length - 1].timestamp?.getTime() ?? 0) - (sorted[0].timestamp?.getTime() ?? 0),
-        walletCount: 1,
-        hasCopy: false,
-        copyPnl: null,
-        copyStatus: null,
+export async function analyzeConsensus(): Promise<ConsensusResult> {
+  const [rawTradesRaw, paperTradesRaw] = await Promise.all([
+    prisma.observedTrade.findMany({
+      where: {
+        side: "BUY",
+        tokenId: { not: null },
+        slug: { not: null },
+        timestamp: { not: null },
+      },
+      orderBy: { timestamp: "asc" },
+      select: {
+        id: true,
+        walletAddress: true,
+        tokenId: true,
+        slug: true,
+        detectedPrice: true,
+        size: true,
+        timestamp: true,
+        marketId: true,
+      },
+    }),
+    prisma.paperTrade.findMany({
+      where: { source: "wallet_copy", tokenId: { not: null } },
+      select: {
+        id: true,
+        tokenId: true,
+        openedAt: true,
+        status: true,
+        realizedPnl: true,
+        unrealizedPnl: true,
+      },
+      orderBy: { openedAt: "asc" },
+    }),
+  ]);
+  const rawTrades = rawTradesRaw as ObservedBuy[];
+  const paperTrades = paperTradesRaw as PaperCopy[];
+
+  const uniqueTrades: ObservedBuy[] = [];
+  const fingerprints = new Set<string>();
+  for (const trade of rawTrades) {
+    const fingerprint = tradeFingerprint(trade);
+    if (fingerprints.has(fingerprint)) continue;
+    fingerprints.add(fingerprint);
+    uniqueTrades.push(trade);
+  }
+
+  const byToken = new Map<string, ObservedBuy[]>();
+  for (const trade of uniqueTrades) {
+    if (!trade.tokenId || !trade.timestamp) continue;
+    const list = byToken.get(trade.tokenId) ?? [];
+    list.push(trade);
+    byToken.set(trade.tokenId, list);
+  }
+
+  const copiesByToken = new Map<string, PaperCopy[]>();
+  for (const trade of paperTrades) {
+    if (!trade.tokenId) continue;
+    const list = copiesByToken.get(trade.tokenId) ?? [];
+    list.push(trade);
+    copiesByToken.set(trade.tokenId, list);
+  }
+
+  const campaigns: ConsensusCampaign[] = [];
+  for (const [tokenId, tokenTrades] of byToken) {
+    const tokenCampaigns = splitCampaigns(tokenTrades);
+    for (let index = 0; index < tokenCampaigns.length; index++) {
+      const trades = tokenCampaigns[index];
+      if (!trades.length) continue;
+      const walletSignals = aggregateWalletSignals(trades);
+      const delayMs = confirmationDelayMs(walletSignals);
+      const startAt = trades[0].timestamp!;
+      const endAt = trades[trades.length - 1].timestamp!;
+      const candidateCopies = copiesByToken.get(tokenId) ?? [];
+      const matchedCopies = candidateCopies.filter((copy) => {
+        const opened = copy.openedAt.getTime();
+        return opened >= startAt.getTime() - COPY_MATCH_BEFORE_MS
+          && opened <= endAt.getTime() + COPY_MATCH_AFTER_MS;
       });
-      continue;
-    }
+      const copyPnls = matchedCopies.map((copy) => copy.status === "open"
+        ? Number(copy.unrealizedPnl) || 0
+        : Number(copy.realizedPnl) || 0);
+      const copyPnl = copyPnls.length ? copyPnls.reduce((sum, pnl) => sum + pnl, 0) : null;
 
-    // Check if different wallets are within the consensus window
-    const first = sorted[0].timestamp?.getTime() ?? 0;
-    const inWindow = sorted.filter((t) => (t.timestamp?.getTime() ?? 0) - first <= CONSENSUS_WINDOW_MS);
-    const windowWallets = new Set(inWindow.map((t) => t.walletAddress));
-
-    if (windowWallets.size >= 2) {
-      consensusEvents.push({
+      campaigns.push({
+        id: `${tokenId}:${startAt.toISOString()}:${index}`,
         tokenId,
-        slug: sorted[0].slug ?? "",
-        wallets: [...windowWallets],
-        timestamps: inWindow.map((t) => t.timestamp!),
-        prices: inWindow.map((t) => t.detectedPrice ?? 0),
-        sizes: inWindow.map((t) => t.size ?? 0),
-        windowMs: (inWindow[inWindow.length - 1].timestamp?.getTime() ?? 0) - first,
-        walletCount: windowWallets.size,
-        hasCopy: false,
-        copyPnl: null,
-        copyStatus: null,
+        slug: trades[0].slug ?? "",
+        startAt: startAt.toISOString(),
+        endAt: endAt.toISOString(),
+        walletSignals,
+        walletCount: walletSignals.length,
+        fillCount: trades.length,
+        confirmationDelayMinutes: delayMs == null ? null : round(delayMs / 60_000, 2),
+        isConsensus: delayMs != null && delayMs <= PRIMARY_WINDOW_MS,
+        isLateAgreement: delayMs != null && delayMs > PRIMARY_WINDOW_MS,
+        scaleInWallets: walletSignals.filter((signal) => signal.fillCount >= 2).length,
+        hasCopy: matchedCopies.length > 0,
+        copyCount: matchedCopies.length,
+        copyStatus: classifyCopyStatus(matchedCopies.map((copy) => copy.status)),
+        copyPnl: copyPnl == null ? null : round(copyPnl),
       });
     }
   }
 
-  // Match consensus events with our paper trades (did we copy them?)
-  const paperTrades = await prisma.paperTrade.findMany({
-    where: { tokenId: { not: null } },
-    select: { tokenId: true, unrealizedPnl: true, realizedPnl: true, status: true },
-  });
-  const paperByToken = new Map<string, typeof paperTrades[0]>();
-  for (const pt of paperTrades) {
-    if (pt.tokenId) paperByToken.set(pt.tokenId, pt);
+  campaigns.sort((a, b) => a.startAt.localeCompare(b.startAt));
+  const consensus = campaigns.filter((campaign) => campaign.isConsensus);
+  const solo = campaigns.filter((campaign) => campaign.walletCount === 1);
+  const late = campaigns.filter((campaign) => campaign.isLateAgreement);
+  const consensusResolved = consensus.filter((campaign) => campaign.copyStatus === "resolved");
+  const soloResolved = solo.filter((campaign) => campaign.copyStatus === "resolved");
+
+  function pnlStats(items: ConsensusCampaign[]): { pnl: number; wins: number; losses: number; winRate: number } {
+    const pnls = items.map((item) => item.copyPnl ?? 0);
+    const wins = pnls.filter((pnl) => pnl > EPSILON).length;
+    const losses = pnls.filter((pnl) => pnl < -EPSILON).length;
+    return {
+      pnl: round(pnls.reduce((sum, pnl) => sum + pnl, 0)),
+      wins,
+      losses,
+      winRate: wins + losses ? round(wins / (wins + losses), 4) : 0,
+    };
   }
 
-  for (const ev of [...consensusEvents, ...soloEvents]) {
-    const pt = paperByToken.get(ev.tokenId);
-    if (pt) {
-      ev.hasCopy = true;
-      ev.copyPnl = pt.status !== "open" ? (pt.realizedPnl ?? 0) : (pt.unrealizedPnl ?? 0);
-      ev.copyStatus = pt.status;
-    }
-  }
-
-  // Report
-  console.log(`=== CONSENSUS EVENTS (2+ wallets, ${CONSENSUS_WINDOW_MS / 60000}min window) ===`);
-  console.log(`Total consensus events: ${consensusEvents.length}`);
-  console.log(`Total solo events: ${soloEvents.length}\n`);
-
-  // Consensus with copies
-  const consensusCopied = consensusEvents.filter((e) => e.hasCopy);
-  const consensusNotCopied = consensusEvents.filter((e) => !e.hasCopy);
-  const soloCopied = soloEvents.filter((e) => e.hasCopy);
-
-  console.log(`Consensus events we copied: ${consensusCopied.length}`);
-  console.log(`Consensus events we MISSED: ${consensusNotCopied.length}`);
-  console.log(`Solo events we copied: ${soloCopied.length}\n`);
-
-  // PnL comparison
-  const consensusPnl = consensusCopied.reduce((s, e) => s + (e.copyPnl ?? 0), 0);
-  const soloPnl = soloCopied.reduce((s, e) => s + (e.copyPnl ?? 0), 0);
-  const consensusWins = consensusCopied.filter((e) => (e.copyPnl ?? 0) > 0).length;
-  const soloWins = soloCopied.filter((e) => (e.copyPnl ?? 0) > 0).length;
-
-  console.log("=== PnL BY SIGNAL TYPE ===");
-  console.log(`Consensus copies: ${consensusCopied.length} trades, PnL $${consensusPnl.toFixed(2)}, win ${consensusCopied.length ? Math.round(consensusWins / consensusCopied.length * 100) : 0}%`);
-  console.log(`Solo copies:      ${soloCopied.length} trades, PnL $${soloPnl.toFixed(2)}, win ${soloCopied.length ? Math.round(soloWins / soloCopied.length * 100) : 0}%`);
-
-  // Missed consensus (what we left on the table)
-  if (consensusNotCopied.length) {
-    console.log(`\n=== MISSED CONSENSUS (not copied) ===`);
-    for (const ev of consensusNotCopied.slice(0, 20)) {
-      const time = ev.timestamps[0]?.toISOString().slice(5, 16).replace("T", " ") ?? "?";
-      console.log(`  ${time} | ${ev.slug.slice(0, 35).padEnd(35)} | ${ev.walletCount} wallets | prices: ${ev.prices.map((p) => p.toFixed(2)).join(", ")}`);
-    }
-  }
-
-  // Wallet agreement matrix
-  console.log("\n=== WALLET AGREEMENT MATRIX (top pairs) ===");
-  const pairCount = new Map<string, number>();
-  for (const ev of consensusEvents) {
-    const wallets = ev.wallets.sort();
+  const consensusStats = pnlStats(consensusResolved);
+  const soloStats = pnlStats(soloResolved);
+  const pairCounts = new Map<string, { walletA: string; walletB: string; count: number }>();
+  for (const campaign of consensus) {
+    const wallets = campaign.walletSignals.map((signal) => signal.walletAddress).sort();
     for (let i = 0; i < wallets.length; i++) {
       for (let j = i + 1; j < wallets.length; j++) {
-        const key = `${wallets[i].slice(0, 10)}|${wallets[j].slice(0, 10)}`;
-        pairCount.set(key, (pairCount.get(key) ?? 0) + 1);
+        const key = `${wallets[i]}|${wallets[j]}`;
+        const previous = pairCounts.get(key);
+        pairCounts.set(key, {
+          walletA: wallets[i],
+          walletB: wallets[j],
+          count: (previous?.count ?? 0) + 1,
+        });
       }
     }
   }
-  const topPairs = [...pairCount.entries()].sort((a, b) => b[1] - a[1]).slice(0, 10);
-  for (const [pair, count] of topPairs) {
-    const [a, b] = pair.split("|");
-    console.log(`  ${a}... ↔ ${b}... : ${count} shared bets`);
+
+  return {
+    generatedAt: new Date().toISOString(),
+    primaryWindowMinutes: PRIMARY_WINDOW_MINUTES,
+    campaigns,
+    consensusEvents: consensus.length,
+    lateAgreementEvents: late.length,
+    soloEvents: solo.length,
+    consensusCopied: consensus.filter((campaign) => campaign.hasCopy).length,
+    consensusMissed: consensus.filter((campaign) => !campaign.hasCopy).length,
+    consensusResolvedCopies: consensusResolved.length,
+    consensusResolvedPnl: consensusStats.pnl,
+    consensusResolvedWinRate: consensusStats.winRate,
+    soloResolvedCopies: soloResolved.length,
+    soloResolvedPnl: soloStats.pnl,
+    soloResolvedWinRate: soloStats.winRate,
+    scaleInCampaigns: campaigns.filter((campaign) => campaign.scaleInWallets > 0).length,
+    sensitivity: SENSITIVITY_WINDOWS_MINUTES.map((windowMinutes) => {
+      const windowMs = windowMinutes * 60_000;
+      let consensusEvents = 0;
+      for (const tokenTrades of byToken.values()) {
+        for (const campaignTrades of splitCampaigns(tokenTrades, windowMs)) {
+          const uniqueWallets = new Set(campaignTrades.map((trade) => trade.walletAddress.toLowerCase()));
+          if (uniqueWallets.size >= 2) consensusEvents++;
+        }
+      }
+      return { windowMinutes, consensusEvents };
+    }),
+    topPairs: [...pairCounts.values()]
+      .sort((a, b) => b.count - a.count)
+      .slice(0, 10)
+      .map((pair) => ({ walletA: pair.walletA, walletB: pair.walletB, sharedCampaigns: pair.count })),
+  };
+}
+
+export function printConsensusResult(result: ConsensusResult): void {
+  console.log("=== CONSENSUS ANALYSIS ===\n");
+  console.log(`Primary agreement window: ${result.primaryWindowMinutes} minutes`);
+  console.log(`Consensus / late / solo:  ${result.consensusEvents} / ${result.lateAgreementEvents} / ${result.soloEvents}`);
+  console.log(`Copied / missed:          ${result.consensusCopied} / ${result.consensusMissed}`);
+  console.log(`Scale-in campaigns:       ${result.scaleInCampaigns}`);
+  console.log(`Consensus resolved:       ${result.consensusResolvedCopies}, PnL $${result.consensusResolvedPnl.toFixed(2)}, win ${(result.consensusResolvedWinRate * 100).toFixed(0)}%`);
+  console.log(`Solo resolved:            ${result.soloResolvedCopies}, PnL $${result.soloResolvedPnl.toFixed(2)}, win ${(result.soloResolvedWinRate * 100).toFixed(0)}%`);
+  console.log(`Window sensitivity:       ${result.sensitivity.map((item) => `${item.windowMinutes}m=${item.consensusEvents}`).join(" | ")}`);
+
+  const missed = result.campaigns.filter((campaign) => campaign.isConsensus && !campaign.hasCopy);
+  if (missed.length) {
+    console.log("\n=== MISSED CONSENSUS ===");
+    for (const campaign of missed.slice(0, 20)) {
+      console.log(`  ${campaign.startAt.slice(5, 16).replace("T", " ")} | ${campaign.slug.slice(0, 42).padEnd(42)} | ${campaign.walletCount} wallets | confirm ${campaign.confirmationDelayMinutes?.toFixed(1)}m`);
+    }
   }
 
-  // Scale-in detection (same wallet, same token, multiple fills)
-  console.log("\n=== SCALE-IN DETECTION (same wallet, same token, 2+ fills) ===");
-  const scaleIns = soloEvents.filter((e) => e.timestamps.length >= 2 && e.walletCount === 1);
-  console.log(`Scale-in events: ${scaleIns.length}`);
-  const scaleInCopied = scaleIns.filter((e) => e.hasCopy);
-  const scaleInPnl = scaleInCopied.reduce((s, e) => s + (e.copyPnl ?? 0), 0);
-  console.log(`Scale-ins we copied: ${scaleInCopied.length}, PnL: $${scaleInPnl.toFixed(2)}`);
-  if (scaleIns.length) {
-    console.log("\nTop scale-ins by total size:");
-    const topScaleIns = scaleIns
-      .map((e) => ({ ...e, totalSize: e.sizes.reduce((s, x) => s + x, 0) }))
-      .sort((a, b) => b.totalSize - a.totalSize)
-      .slice(0, 10);
-    for (const ev of topScaleIns) {
-      console.log(`  ${ev.slug.slice(0, 30).padEnd(30)} | ${ev.timestamps.length} fills | total ${ev.totalSize.toFixed(0)} shares | ${ev.hasCopy ? `copied, PnL $${(ev.copyPnl ?? 0).toFixed(2)}` : "NOT copied"}`);
+  if (result.topPairs.length) {
+    console.log("\n=== TOP WALLET PAIRS ===");
+    for (const pair of result.topPairs) {
+      console.log(`  ${pair.walletA.slice(0, 10)}... ↔ ${pair.walletB.slice(0, 10)}... : ${pair.sharedCampaigns}`);
     }
   }
 }
 
-main().catch(console.error);
+function isDirectRun(): boolean {
+  if (!process.argv[1]) return false;
+  return import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href;
+}
+
+if (isDirectRun()) {
+  analyzeConsensus()
+    .then(printConsensusResult)
+    .catch((error) => {
+      console.error(error);
+      process.exitCode = 1;
+    })
+    .finally(() => prisma.$disconnect());
+}

@@ -1,24 +1,24 @@
 /**
  * RESEARCH MODULE — Capital-Constrained Replay
- * 
- * Reads all paper trades chronologically and simulates a $300 bankroll
- * with realistic capital constraints. Reports ROI, drawdown, utilization.
- * READ-ONLY — does not modify the main pipeline or database.
- * 
+ * READ-ONLY: replays wallet-copy paper trades against a constrained bankroll.
  * Usage: npx tsx src/research/capitalReplay.ts
  */
+import { pathToFileURL } from "node:url";
+import * as path from "node:path";
 import { prisma } from "../lib/db.js";
 
 const STARTING_BANKROLL = 300;
-const MAX_DEPLOYED_PCT = 0.70; // 70% max deployed
-const MAX_PER_TRADE_PCT = 0.10; // 10% max per trade
-const MAX_PER_EVENT_PCT = 0.10; // 10% max per event (slug)
+const MAX_DEPLOYED_PCT = 0.70;
+const MAX_PER_TRADE_PCT = 0.10;
+const MAX_PER_EVENT_PCT = 0.10;
+const MIN_TRADE_USD = 3;
+const EPSILON = 0.005;
 
 interface ReplayTrade {
   id: string;
   slug: string | null;
+  marketId: string;
   walletAddress: string;
-  entryPrice: number | null;
   simulatedPositionSize: number | null;
   openedAt: Date;
   status: string;
@@ -26,193 +26,348 @@ interface ReplayTrade {
   unrealizedPnl: number | null;
   resolvedAt: Date | null;
   closedAt: Date | null;
+  pnlSnapshots: { pnl: number | null; collectedAt: Date }[];
 }
 
-interface CapitalEvent {
-  time: Date;
-  type: "deploy" | "recycle";
-  amount: number;
-  slug: string;
-  wallet: string;
-  bankrollAfter: number;
-  deployedAfter: number;
+interface PositionState {
+  trade: ReplayTrade;
+  stake: number;
+  scale: number;
+  eventKey: string;
+  markedPnl: number;
+  currentValue: number;
 }
 
-async function main() {
-  console.log(`=== CAPITAL-CONSTRAINED REPLAY: $${STARTING_BANKROLL} ===\n`);
+type ReplayEvent =
+  | { time: Date; priority: 0; type: "exit"; tradeId: string }
+  | { time: Date; priority: 1; type: "mark"; tradeId: string; pnl: number }
+  | { time: Date; priority: 2; type: "open"; tradeId: string };
 
-  // Get all wallet-copy paper trades chronologically
+export interface ReplayWalletStat {
+  walletAddress: string;
+  accepted: number;
+  resolved: number;
+  deployed: number;
+  pnl: number;
+}
+
+export interface CapitalReplayResult {
+  generatedAt: string;
+  startingBankroll: number;
+  finalEquity: number;
+  cash: number;
+  openMarketValue: number;
+  netPnl: number;
+  roiPct: number;
+  realizedPnl: number;
+  unrealizedPnl: number;
+  maxDrawdownPct: number;
+  peakEquity: number;
+  averageUtilizationPct: number;
+  peakUtilizationPct: number;
+  acceptedTrades: number;
+  acceptedFinalizedTrades: number;
+  acceptedResolvedTrades: number;
+  acceptedClosedTrades: number;
+  acceptedOpenTrades: number;
+  skippedNoCapital: number;
+  skippedEventCap: number;
+  skippedInvalid: number;
+  wins: number;
+  losses: number;
+  scratches: number;
+  winRate: number;
+  snapshotCoveragePct: number;
+  payoutAnomalies: number;
+  walletStats: ReplayWalletStat[];
+}
+
+function round(value: number, digits = 2): number {
+  const factor = 10 ** digits;
+  return Math.round(value * factor) / factor;
+}
+
+function terminalTime(trade: ReplayTrade): Date | null {
+  const times = [trade.closedAt, trade.resolvedAt].filter((value): value is Date => value != null);
+  if (!times.length) return null;
+  return new Date(Math.min(...times.map((value) => value.getTime())));
+}
+
+function originalStake(trade: ReplayTrade): number {
+  const value = Number(trade.simulatedPositionSize);
+  return Number.isFinite(value) && value > 0 ? value : 0;
+}
+
+export async function runCapitalReplay(): Promise<CapitalReplayResult> {
   const trades = await prisma.paperTrade.findMany({
     where: { source: "wallet_copy" },
     orderBy: { openedAt: "asc" },
     select: {
-      id: true, slug: true, walletAddress: true, entryPrice: true,
-      simulatedPositionSize: true, openedAt: true, status: true,
-      realizedPnl: true, unrealizedPnl: true, resolvedAt: true, closedAt: true,
+      id: true,
+      slug: true,
+      marketId: true,
+      walletAddress: true,
+      simulatedPositionSize: true,
+      openedAt: true,
+      status: true,
+      realizedPnl: true,
+      unrealizedPnl: true,
+      resolvedAt: true,
+      closedAt: true,
+      pnlSnapshots: {
+        orderBy: { collectedAt: "asc" },
+        select: { pnl: true, collectedAt: true },
+      },
     },
-  });
+  }) as ReplayTrade[];
 
-  if (!trades.length) {
-    console.log("No wallet-copy trades found.");
-    return;
+  const now = new Date();
+  const tradeById = new Map(trades.map((trade) => [trade.id, trade]));
+  const events: ReplayEvent[] = [];
+  let tradesWithSnapshots = 0;
+
+  for (const trade of trades) {
+    events.push({ time: trade.openedAt, priority: 2, type: "open", tradeId: trade.id });
+    const endTime = terminalTime(trade);
+    const boundedSnapshots = trade.pnlSnapshots.filter((snapshot) => {
+      if (!Number.isFinite(Number(snapshot.pnl))) return false;
+      return snapshot.collectedAt >= trade.openedAt && (!endTime || snapshot.collectedAt <= endTime);
+    });
+    if (boundedSnapshots.length) tradesWithSnapshots++;
+    for (const snapshot of boundedSnapshots) {
+      events.push({
+        time: snapshot.collectedAt,
+        priority: 1,
+        type: "mark",
+        tradeId: trade.id,
+        pnl: Number(snapshot.pnl),
+      });
+    }
+    if (endTime) {
+      events.push({ time: endTime, priority: 0, type: "exit", tradeId: trade.id });
+    } else {
+      events.push({
+        time: now,
+        priority: 1,
+        type: "mark",
+        tradeId: trade.id,
+        pnl: Number(trade.unrealizedPnl) || 0,
+      });
+    }
   }
 
-  console.log(`Total trades: ${trades.length}`);
-  console.log(`Date range: ${trades[0].openedAt.toISOString().slice(0, 10)} → ${trades[trades.length - 1].openedAt.toISOString().slice(0, 10)}\n`);
+  events.sort((a, b) => a.time.getTime() - b.time.getTime() || a.priority - b.priority);
 
-  // Simulate
-  let bankroll = STARTING_BANKROLL;
-  let deployed = 0;
-  let peakBankroll = STARTING_BANKROLL;
-  let maxDrawdown = 0;
-  let skippedNoCapital = 0;
-  let skippedMaxEvent = 0;
-  let acceptedTrades = 0;
-  let totalPnl = 0;
+  let cash = STARTING_BANKROLL;
   let realizedPnl = 0;
+  let skippedNoCapital = 0;
+  let skippedEventCap = 0;
+  let skippedInvalid = 0;
+  let payoutAnomalies = 0;
   let wins = 0;
   let losses = 0;
+  let scratches = 0;
+  let acceptedFinalizedTrades = 0;
+  let acceptedResolvedTrades = 0;
+  let acceptedClosedTrades = 0;
+  let peakEquity = STARTING_BANKROLL;
+  let maxDrawdown = 0;
+  let utilizationSamples = 0;
+  let utilizationSum = 0;
+  let peakUtilization = 0;
 
-  const events: CapitalEvent[] = [];
-  const openPositions = new Map<string, { size: number; slug: string }>(); // tradeId → {size, slug}
-  const eventExposure = new Map<string, number>(); // slug → deployed amount
+  const positions = new Map<string, PositionState>();
+  const eventExposure = new Map<string, number>();
+  const walletStats = new Map<string, ReplayWalletStat>();
 
-  // Process trades chronologically
-  for (const trade of trades) {
-    const entryPrice = trade.entryPrice ?? 0.5;
-    const slug = trade.slug ?? "unknown";
-    const wallet = trade.walletAddress.slice(0, 10);
+  function deployedCost(): number {
+    let value = 0;
+    for (const position of positions.values()) value += position.stake;
+    return value;
+  }
 
-    // First: recycle any capital from trades resolved BEFORE this one opened
-    for (const [openId, pos] of [...openPositions.entries()]) {
-      const openTrade = trades.find((t) => t.id === openId);
-      if (!openTrade) continue;
-      const endTime = openTrade.resolvedAt ?? openTrade.closedAt;
-      if (endTime && endTime < trade.openedAt) {
-        // Recycle capital
-        const pnl = openTrade.status === "resolved" ? (openTrade.realizedPnl ?? 0) : (openTrade.realizedPnl ?? 0);
-        const recycled = pos.size + pnl;
-        bankroll += Math.max(0, recycled);
-        deployed -= pos.size;
-        const slugExposure = eventExposure.get(pos.slug) ?? 0;
-        eventExposure.set(pos.slug, Math.max(0, slugExposure - pos.size));
-        openPositions.delete(openId);
-        events.push({ time: endTime, type: "recycle", amount: recycled, slug: pos.slug, wallet: "", bankrollAfter: bankroll, deployedAfter: deployed });
-      }
-    }
+  function openMarketValue(): number {
+    let value = 0;
+    for (const position of positions.values()) value += position.currentValue;
+    return value;
+  }
 
-    // Determine position size (use the paper trade's actual size, capped by bankroll %)
-    let size = trade.simulatedPositionSize ?? 10;
-    const maxTrade = bankroll * MAX_PER_TRADE_PCT;
-    const maxDeployed = STARTING_BANKROLL * MAX_DEPLOYED_PCT;
-    const maxEvent = STARTING_BANKROLL * MAX_PER_EVENT_PCT;
+  function equity(): number {
+    return cash + openMarketValue();
+  }
 
-    // Check capital constraints
-    const currentEventExposure = eventExposure.get(slug) ?? 0;
-    if (deployed + size > maxDeployed) {
-      size = Math.max(0, maxDeployed - deployed);
-      if (size < 3) { // minimum viable trade
-        skippedNoCapital++;
+  function sampleRiskState(): void {
+    const currentEquity = equity();
+    if (currentEquity > peakEquity) peakEquity = currentEquity;
+    if (peakEquity > 0) maxDrawdown = Math.max(maxDrawdown, (peakEquity - currentEquity) / peakEquity);
+    const utilization = currentEquity > 0 ? deployedCost() / currentEquity : 0;
+    peakUtilization = Math.max(peakUtilization, utilization);
+    utilizationSum += utilization;
+    utilizationSamples++;
+  }
+
+  for (const event of events) {
+    const trade = tradeById.get(event.tradeId);
+    if (!trade) continue;
+
+    if (event.type === "open") {
+      const sourceStake = originalStake(trade);
+      const endTime = terminalTime(trade);
+      if (sourceStake <= 0 || (endTime != null && endTime.getTime() < trade.openedAt.getTime())) {
+        skippedInvalid++;
         continue;
       }
-    }
-    if (currentEventExposure + size > maxEvent) {
-      size = Math.max(0, maxEvent - currentEventExposure);
-      if (size < 3) {
-        skippedMaxEvent++;
+
+      const currentEquity = equity();
+      const currentDeployed = deployedCost();
+      const eventKey = trade.slug ?? trade.marketId;
+      const currentEventExposure = eventExposure.get(eventKey) ?? 0;
+      const maxTrade = currentEquity * MAX_PER_TRADE_PCT;
+      const maxDeployed = currentEquity * MAX_DEPLOYED_PCT;
+      const maxEvent = currentEquity * MAX_PER_EVENT_PCT;
+      const availableByPortfolio = Math.max(0, maxDeployed - currentDeployed);
+      const availableByEvent = Math.max(0, maxEvent - currentEventExposure);
+      const stake = round(Math.min(sourceStake, maxTrade, availableByPortfolio, availableByEvent, cash));
+
+      if (stake < MIN_TRADE_USD) {
+        if (availableByEvent < MIN_TRADE_USD) skippedEventCap++;
+        else skippedNoCapital++;
         continue;
       }
-    }
-    if (size > bankroll * MAX_PER_TRADE_PCT) {
-      size = bankroll * MAX_PER_TRADE_PCT;
-    }
-    if (size < 3) {
-      skippedNoCapital++;
+
+      const scale = stake / sourceStake;
+      positions.set(trade.id, {
+        trade,
+        stake,
+        scale,
+        eventKey,
+        markedPnl: 0,
+        currentValue: stake,
+      });
+      eventExposure.set(eventKey, currentEventExposure + stake);
+      cash -= stake;
+
+      const wallet = walletStats.get(trade.walletAddress) ?? {
+        walletAddress: trade.walletAddress,
+        accepted: 0,
+        resolved: 0,
+        deployed: 0,
+        pnl: 0,
+      };
+      wallet.accepted++;
+      wallet.deployed += stake;
+      walletStats.set(trade.walletAddress, wallet);
+      sampleRiskState();
       continue;
     }
 
-    // Deploy
-    size = Math.round(size * 100) / 100;
-    bankroll -= size;
-    deployed += size;
-    eventExposure.set(slug, currentEventExposure + size);
-    openPositions.set(trade.id, { size, slug });
-    acceptedTrades++;
-    events.push({ time: trade.openedAt, type: "deploy", amount: size, slug, wallet, bankrollAfter: bankroll, deployedAfter: deployed });
-  }
+    const position = positions.get(trade.id);
+    if (!position) continue;
 
-  // Final: resolve all remaining open positions at their current marks
-  for (const [openId, pos] of openPositions.entries()) {
-    const openTrade = trades.find((t) => t.id === openId);
-    if (!openTrade) continue;
-    const pnl = openTrade.status === "open" ? (openTrade.unrealizedPnl ?? 0) : (openTrade.realizedPnl ?? 0);
-    const recycled = pos.size + pnl;
-    bankroll += Math.max(0, recycled);
-    deployed -= pos.size;
-    totalPnl += pnl;
-    if (pnl > 0) wins++;
-    else losses++;
-    if (openTrade.status === "resolved") realizedPnl += (openTrade.realizedPnl ?? 0);
-  }
-
-  // Also count PnL from trades that were recycled during the simulation
-  for (const trade of trades) {
-    if ((trade.resolvedAt ?? trade.closedAt) && trade.status !== "open") {
-      const pnl = trade.realizedPnl ?? 0;
-      totalPnl += pnl;
-      if (pnl > 0) wins++;
-      else losses++;
-      realizedPnl += pnl;
+    if (event.type === "mark") {
+      position.markedPnl = event.pnl * position.scale;
+      position.currentValue = Math.max(0, position.stake + position.markedPnl);
+      sampleRiskState();
+      continue;
     }
+
+    const rawPnl = (Number(trade.realizedPnl) || 0) * position.scale;
+    const rawPayout = position.stake + rawPnl;
+    if (rawPayout < -EPSILON) payoutAnomalies++;
+    const payout = Math.max(0, rawPayout);
+    const scaledPnl = payout - position.stake;
+    cash += payout;
+    realizedPnl += scaledPnl;
+    acceptedFinalizedTrades++;
+    if (trade.status === "resolved") acceptedResolvedTrades++;
+    else acceptedClosedTrades++;
+    if (scaledPnl > EPSILON) wins++;
+    else if (scaledPnl < -EPSILON) losses++;
+    else scratches++;
+
+    const exposure = eventExposure.get(position.eventKey) ?? 0;
+    eventExposure.set(position.eventKey, Math.max(0, exposure - position.stake));
+    positions.delete(trade.id);
+
+    const wallet = walletStats.get(trade.walletAddress);
+    if (wallet) {
+      wallet.resolved++;
+      wallet.pnl += scaledPnl;
+    }
+    sampleRiskState();
   }
 
-  // Compute drawdown from events
-  let runningValue = STARTING_BANKROLL;
-  peakBankroll = STARTING_BANKROLL;
-  for (const ev of events) {
-    runningValue = ev.bankrollAfter + ev.deployedAfter;
-    if (runningValue > peakBankroll) peakBankroll = runningValue;
-    const dd = (peakBankroll - runningValue) / peakBankroll;
-    if (dd > maxDrawdown) maxDrawdown = dd;
-  }
+  const currentOpenValue = openMarketValue();
+  const currentOpenCost = deployedCost();
+  const unrealizedPnl = currentOpenValue - currentOpenCost;
+  const finalEquity = cash + currentOpenValue;
+  const acceptedTrades = [...walletStats.values()].reduce((sum, wallet) => sum + wallet.accepted, 0);
+  const decisive = wins + losses;
 
-  const finalValue = bankroll + deployed;
-  const roi = ((finalValue - STARTING_BANKROLL) / STARTING_BANKROLL * 100);
+  return {
+    generatedAt: now.toISOString(),
+    startingBankroll: STARTING_BANKROLL,
+    finalEquity: round(finalEquity),
+    cash: round(cash),
+    openMarketValue: round(currentOpenValue),
+    netPnl: round(finalEquity - STARTING_BANKROLL),
+    roiPct: round((finalEquity - STARTING_BANKROLL) / STARTING_BANKROLL * 100),
+    realizedPnl: round(realizedPnl),
+    unrealizedPnl: round(unrealizedPnl),
+    maxDrawdownPct: round(maxDrawdown * 100),
+    peakEquity: round(peakEquity),
+    averageUtilizationPct: round((utilizationSamples ? utilizationSum / utilizationSamples : 0) * 100),
+    peakUtilizationPct: round(peakUtilization * 100),
+    acceptedTrades,
+    acceptedFinalizedTrades,
+    acceptedResolvedTrades,
+    acceptedClosedTrades,
+    acceptedOpenTrades: positions.size,
+    skippedNoCapital,
+    skippedEventCap,
+    skippedInvalid,
+    wins,
+    losses,
+    scratches,
+    winRate: decisive ? round(wins / decisive, 4) : 0,
+    snapshotCoveragePct: trades.length ? round(tradesWithSnapshots / trades.length * 100) : 0,
+    payoutAnomalies,
+    walletStats: [...walletStats.values()]
+      .map((wallet) => ({ ...wallet, deployed: round(wallet.deployed), pnl: round(wallet.pnl) }))
+      .sort((a, b) => b.pnl - a.pnl),
+  };
+}
 
-  console.log("=== RESULTS ===");
-  console.log(`Starting bankroll:     $${STARTING_BANKROLL.toFixed(2)}`);
-  console.log(`Final value:           $${finalValue.toFixed(2)} (cash $${bankroll.toFixed(2)} + deployed $${deployed.toFixed(2)})`);
-  console.log(`Net PnL:               $${(finalValue - STARTING_BANKROLL).toFixed(2)}`);
-  console.log(`ROI on bankroll:       ${roi.toFixed(2)}%`);
-  console.log(`Realized PnL:          $${realizedPnl.toFixed(2)}`);
-  console.log(`Max drawdown:          ${(maxDrawdown * 100).toFixed(2)}%`);
-  console.log(`Peak value:            $${peakBankroll.toFixed(2)}`);
-  console.log(`\nTrades accepted:       ${acceptedTrades}`);
-  console.log(`Trades skipped (capital): ${skippedNoCapital}`);
-  console.log(`Trades skipped (event cap): ${skippedMaxEvent}`);
-  console.log(`Wins / Losses:         ${wins} / ${losses} (${wins + losses > 0 ? Math.round(wins / (wins + losses) * 100) : 0}% win)`);
-  console.log(`Capital utilization:   ${(deployed / STARTING_BANKROLL * 100).toFixed(1)}% currently deployed`);
+export function printCapitalReplay(result: CapitalReplayResult): void {
+  console.log(`=== CAPITAL-CONSTRAINED REPLAY: $${result.startingBankroll} ===\n`);
+  console.log(`Final equity:          $${result.finalEquity.toFixed(2)} (cash $${result.cash.toFixed(2)} + open value $${result.openMarketValue.toFixed(2)})`);
+  console.log(`Net PnL / ROI:         $${result.netPnl.toFixed(2)} / ${result.roiPct.toFixed(2)}%`);
+  console.log(`Realized / unrealized: $${result.realizedPnl.toFixed(2)} / $${result.unrealizedPnl.toFixed(2)}`);
+  console.log(`Max drawdown:          ${result.maxDrawdownPct.toFixed(2)}%`);
+  console.log(`Average / peak use:    ${result.averageUtilizationPct.toFixed(1)}% / ${result.peakUtilizationPct.toFixed(1)}%`);
+  console.log(`Accepted:              ${result.acceptedTrades} (${result.acceptedResolvedTrades} resolved, ${result.acceptedClosedTrades} closed, ${result.acceptedOpenTrades} open)`);
+  console.log(`Skipped:               ${result.skippedNoCapital} capital, ${result.skippedEventCap} event cap, ${result.skippedInvalid} invalid`);
+  console.log(`Resolved W/L/S:        ${result.wins}/${result.losses}/${result.scratches} (${(result.winRate * 100).toFixed(0)}% decisive win rate)`);
+  console.log(`Snapshot coverage:     ${result.snapshotCoveragePct.toFixed(1)}% of source trades`);
+  if (result.payoutAnomalies) console.log(`Payout anomalies:      ${result.payoutAnomalies}`);
 
-  // Per-wallet breakdown
-  console.log("\n=== PER-WALLET (accepted trades) ===");
-  const walletPnl = new Map<string, { count: number; pnl: number; deployed: number }>();
-  for (const ev of events.filter((e) => e.type === "deploy")) {
-    const e = walletPnl.get(ev.wallet) ?? { count: 0, pnl: 0, deployed: 0 };
-    e.count++;
-    e.deployed += ev.amount;
-    walletPnl.set(ev.wallet, e);
-  }
-  for (const [w, e] of [...walletPnl.entries()].sort((a, b) => b[1].deployed - a[1].deployed)) {
-    console.log(`  ${w}... ${e.count} trades, $${e.deployed.toFixed(2)} deployed`);
-  }
-
-  // Timeline
-  console.log("\n=== CAPITAL TIMELINE (first 20 events) ===");
-  for (const ev of events.slice(0, 20)) {
-    const time = ev.time.toISOString().slice(5, 16).replace("T", " ");
-    const action = ev.type === "deploy" ? `DEPLOY $${ev.amount.toFixed(2)}` : `RECYCLE $${ev.amount.toFixed(2)}`;
-    console.log(`  ${time} | ${action.padEnd(16)} | ${ev.slug.slice(0, 30).padEnd(30)} | cash=$${ev.bankrollAfter.toFixed(0)} deployed=$${ev.deployedAfter.toFixed(0)}`);
+  console.log("\n=== PER WALLET ===");
+  for (const wallet of result.walletStats.slice(0, 15)) {
+    console.log(`  ${wallet.walletAddress.slice(0, 10)}... | ${wallet.accepted} accepted | ${wallet.resolved} resolved | $${wallet.pnl.toFixed(2)} PnL | $${wallet.deployed.toFixed(2)} deployed`);
   }
 }
 
-main().catch(console.error);
+function isDirectRun(): boolean {
+  if (!process.argv[1]) return false;
+  return import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href;
+}
+
+if (isDirectRun()) {
+  runCapitalReplay()
+    .then(printCapitalReplay)
+    .catch((error) => {
+      console.error(error);
+      process.exitCode = 1;
+    })
+    .finally(() => prisma.$disconnect());
+}
