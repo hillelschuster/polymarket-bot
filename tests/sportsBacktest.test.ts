@@ -28,9 +28,11 @@ describe("sports historical entry", () => {
     expect(favorite?.referencePrice).toBeCloseTo(0.68);
   });
 
-  it("rejects stale or one-sided reference prices", () => {
-    const trades = [trade("A", "BUY", 0.70, 10, 100)];
-    expect(favoriteAtEntry(trades, ["A", "B"], 1_000, 300)).toBeNull();
+  it("infers the opposite token and rejects stale references", () => {
+    const fresh = favoriteAtEntry([trade("B", "BUY", 0.29, 10, 950)], ["A", "B"], 1_000, 300);
+    expect(fresh?.tokenId).toBe("A");
+    expect(fresh?.referencePrice).toBeCloseTo(0.71);
+    expect(favoriteAtEntry([trade("A", "BUY", 0.70, 10, 100)], ["A", "B"], 1_000, 300)).toBeNull();
   });
 
   it("simulates a conservative taker fill with one tick slippage and fees", () => {
@@ -60,7 +62,7 @@ describe("sports backtest accounting", () => {
     expect(normalizeFeeRate(undefined)).toBeCloseTo(0.03);
   });
 
-  it("summarizes realized cash returns", () => {
+  it("summarizes realized returns and same-day clustering", () => {
     const base: Omit<BacktestRow, "won" | "pnl" | "roi"> = {
       sport: "mlb",
       marketId: "1",
@@ -85,6 +87,7 @@ describe("sports backtest accounting", () => {
     ];
     const summary = summarizeBacktest(rows);
     expect(summary.n).toBe(2);
+    expect(summary.independentDays).toBe(1);
     expect(summary.wins).toBe(1);
     expect(summary.cashSpent).toBe(40);
     expect(summary.pnl).toBe(-12);
