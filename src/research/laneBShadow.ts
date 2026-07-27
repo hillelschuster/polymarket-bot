@@ -137,6 +137,13 @@ async function getWalletTradesForMarket(conditionId: string): Promise<{ wallet: 
   }
 }
 
+// --- Slug date parsing ---
+function slugDate(slug: string): Date | null {
+  const match = slug.match(/(\d{4}-\d{2}-\d{2})/);
+  if (!match) return null;
+  return new Date(match[1] + "T12:00:00Z");
+}
+
 // --- Main scan ---
 export async function runLaneBScan(): Promise<void> {
   const log = loadLog();
@@ -151,19 +158,25 @@ export async function runLaneBScan(): Promise<void> {
 
   for (const mkt of markets) {
     const slug = mkt.slug as string;
-    const endDate = mkt.endDate ? new Date(mkt.endDate) : null;
 
-    // Heuristic: market is "likely finished" if endDate is in the past
-    // but market is still active (not resolved)
-    if (!endDate || endDate > now) continue; // not finished yet
-    const hoursSinceEnd = (now.getTime() - endDate.getTime()) / 3_600_000;
-    if (hoursSinceEnd > 6) continue; // too old, probably resolving soon or stuck
+    // Detection heuristic: use PRICE SIGNAL, not endDate.
+    // endDate in Gamma API is a tournament deadline (days/weeks away), NOT game end.
+    // A game is "finished but unresolved" when:
+    //   - One outcome trades at >= 0.90 (market knows the result)
+    //   - Market is still active/closed=false (oracle hasn't settled)
+    //   - Slug date is recent (within last 2 days)
+    const gameDate = slugDate(slug);
+    if (gameDate) {
+      const daysSinceGame = (now.getTime() - gameDate.getTime()) / 86_400_000;
+      if (daysSinceGame > 2) continue; // too old — stuck or already resolving
+      if (daysSinceGame < -0.1) continue; // game hasn't started yet (future date)
+    }
 
     // Check if we already logged this
     const existingId = slug;
     if (log.opportunities.find((o) => o.id === existingId)) continue;
 
-    // Parse outcomes and find the likely winner (price > 0.90)
+    // Parse outcomes and find the likely winner (highest price)
     const outcomes: string[] = Array.isArray(mkt.outcomes) ? (typeof mkt.outcomes === "string" ? JSON.parse(mkt.outcomes) : mkt.outcomes) : [];
     const prices: number[] = (Array.isArray(mkt.outcomePrices) ? (typeof mkt.outcomePrices === "string" ? JSON.parse(mkt.outcomePrices) : mkt.outcomePrices) : []).map(Number);
     const tokenIds: string[] = Array.isArray(mkt.clobTokenIds) ? (typeof mkt.clobTokenIds === "string" ? JSON.parse(mkt.clobTokenIds) : mkt.clobTokenIds) : [];
@@ -176,7 +189,7 @@ export async function runLaneBScan(): Promise<void> {
     }
 
     // Only interesting if the "winner" is between 0.90 and 0.995
-    // (below 0.90 = uncertain, above 0.995 = no profit)
+    // (below 0.90 = game not over yet, above 0.995 = no profit margin)
     if (maxPrice < 0.90 || maxPrice > 0.995) continue;
     if (winIdx < 0 || !tokenIds[winIdx]) continue;
 
@@ -192,7 +205,7 @@ export async function runLaneBScan(): Promise<void> {
     await new Promise((r) => setTimeout(r, 200));
 
     const buysAfterFinish = walletTrades.filter((t) =>
-      t.side === "BUY" && new Date(t.time) > endDate
+      t.side === "BUY" && gameDate && new Date(t.time) > gameDate
     );
 
     const theoreticalReturn = edges.bestAsk > 0 ? (1 - edges.bestAsk) / edges.bestAsk : null;
@@ -202,7 +215,7 @@ export async function runLaneBScan(): Promise<void> {
       slug,
       question: mkt.question ?? slug,
       category: mkt.category ?? null,
-      finishedAt: endDate.toISOString(),
+      finishedAt: gameDate?.toISOString() ?? now.toISOString(),
       detectedAt: now.toISOString(),
       resolvedAt: null,
       winningOutcome: outcomes[winIdx] ?? null,
