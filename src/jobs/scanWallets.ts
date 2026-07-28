@@ -19,11 +19,12 @@ export async function runScanWallets(): Promise<void> {
     for (const r of lb) lbMap.set(r.id, { totalPnl: r.totalPnl, volume: r.volume, roi: r.roi });
   }
 
-  // Bounded, resumable enrichment: only refresh a small batch of top wallets per pass
-  // (oldest first) so scan:wallets always finishes inside the process-time budget and
-  // the loop never gets SIGKILLed mid-enrichment. Top-50 fully refresh every ~4 passes.
-  const ENRICH_BATCH = 12;
-  const ENRICH_MAX_AGE_MS = 30 * 60 * 1000;
+  // Bounded, resumable enrichment: refresh a batch of top wallets per slow-path pass
+  // (oldest first). With slow path every ~28 min and batch=18, top-50 fully refresh
+  // every ~3 passes (~84 min). Pacing: 200ms per wallet + 100ms per slug keeps us
+  // well under Polymarket's rate limits (no 429s observed at this pace).
+  const ENRICH_BATCH = 18;
+  const ENRICH_MAX_AGE_MS = 20 * 60 * 1000;
   const nowMs = Date.now();
   const enrichIds = new Set(
     profiles

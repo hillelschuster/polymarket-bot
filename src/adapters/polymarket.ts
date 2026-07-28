@@ -299,7 +299,13 @@ export async function getMarketBySlug(slug: string): Promise<GammaMarket | null>
   const qs = new URLSearchParams({ slug, limit: "1" });
   const arr = await fetchJson<any[]>(`${GAMMA_API}/markets?${qs}`);
   const m = Array.isArray(arr) ? arr[0] : null;
-  return m ? normalizeGammaMarket(m) : null;
+  if (m) return normalizeGammaMarket(m);
+  // Fallback: Gamma removes resolved markets from the default endpoint.
+  // They are only retrievable with closed=true. Critical for reviewOutcomes.
+  const qs2 = new URLSearchParams({ slug, limit: "1", closed: "true" });
+  const arr2 = await fetchJson<any[]>(`${GAMMA_API}/markets?${qs2}`);
+  const m2 = Array.isArray(arr2) ? arr2[0] : null;
+  return m2 ? normalizeGammaMarket(m2) : null;
 }
 
 export interface ActiveMarketOpts {

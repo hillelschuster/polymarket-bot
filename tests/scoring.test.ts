@@ -190,8 +190,8 @@ describe("scoreTrade", () => {
 
   it("returns skip when entry gap exceeds maxEntryGap", () => {
     const mid = {
-      ...trade, side: "BUY", currentPrice: 0.8, priceMovementSinceEntry: 0.1,
-      spread: 0.01, liquidity: 100_000, // entryGap = 0.1 > 0.05
+      ...trade, side: "BUY", currentPrice: 0.8, priceMovementSinceEntry: 0.15,
+      spread: 0.01, liquidity: 100_000, // entryGap = 0.15 > 0.10
     };
     expect(scoreTrade(mid).decision).toBe("skip");
   });

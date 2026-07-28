@@ -98,10 +98,10 @@ export const DEFAULT_RULES: RuleSetValues = {
   maxPriceMovement: 0.12,            // tighter: skip trades where price already moved >12% in our favor since wallet entry
   topThreshold: 0.80,               // skip BUY when outcome price >0.80 (overfavored extreme); skip SELL when <0.20
   maxAdverseMove: 0.05,             // skip BUY when price dropped >5% since wallet entry (bet already losing); SELL mirror
-  maxEntryGap: 0.05,               // skip if |copyPrice - walletFill| > 5% (post-fill entry leak)
+  maxEntryGap: 0.10,               // skip if |copyPrice - walletFill| > 10% (post-fill entry leak; widened for 7-min cycle drift)
   maxWalletLoss: -3,                // stop copying a wallet after it loses $3 total (prevents blow-ups like -$17.96)
-  maxCopiesPerWallet: 8,            // cap open copies per wallet so we diversify across many good wallets
-  stopLossPct: 0.5,                 // close open paper trades when unrealized loss > 50% of size (cuts catastrophic bleed)
+  maxCopiesPerWallet: 12,           // cap open copies per wallet (raised from 8: best wallets were getting blocked)
+  stopLossPct: 1.0,                 // disabled: pure hold-to-resolution (max loss = position size, no early exit)
   // Market-variable equation (wallet-independent primary selector)
   minFavoritePrice: 0.60,           // only bet favorites (backtest sweep: 0.60 → 44% win +$7.81; [0.60,0.65) bucket profitable)
   minMarketLiquidity: 10_000,       // WIDENED from 89K: small sample (45 trades) may be overfit

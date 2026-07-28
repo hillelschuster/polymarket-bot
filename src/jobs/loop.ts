@@ -1,31 +1,64 @@
-// Job: continuous overnight loop. Runs the full pipeline on an interval.
-// Fault-isolated inside runPipeline, so one bad API call won't kill the loop.
-// ponytail: interval via LOOP_INTERVAL_MS (default 15 min); LOOP_MAX_PASSES caps runs.
-import { runPipeline } from "./runAll.js";
+// Job: continuous loop with dual-cycle architecture.
+//
+// FAST CYCLE (default 7 min): monitor:trades → score:trades → update-pnl → review
+//   Runs frequently to catch signals while fresh (signal age was #1 rejection reason).
+//
+// SLOW CYCLE (default 30 min): scan:leaderboard → scan:wallets → rules → reports
+//   Refreshes wallet intelligence without blocking trade detection.
+//
+// The fast cycle ALWAYS runs first on startup (immediate trade detection).
+// The slow cycle runs on startup too (to populate wallet scores), then every N fast passes.
+//
+// Env overrides:
+//   FAST_INTERVAL_MS  (default 420000 = 7 min)
+//   SLOW_EVERY_N_PASSES (default 4 = every 4th fast pass ≈ 28 min)
+//   LOOP_MAX_PASSES (default Infinity)
+
+import { runFastPath, runSlowPath } from "./runAll.js";
 
 // Safety net: never let an unhandled rejection/exception kill the overnight loop.
-// The wrapper (run_loop.sh) restarts the process; we also log + swallow here so a
-// single bad API call can't terminate the whole run.
 process.on("uncaughtException", (e) => console.error("uncaughtException:", (e as Error).message));
 process.on("unhandledRejection", (e) => console.error("unhandledRejection:", (e as Error)?.message ?? String(e)));
 
-const INTERVAL_MS = Number(process.env.LOOP_INTERVAL_MS ?? 15 * 60 * 1000);
+const FAST_INTERVAL_MS = Number(process.env.FAST_INTERVAL_MS ?? 7 * 60 * 1000);
+const SLOW_EVERY_N_PASSES = Number(process.env.SLOW_EVERY_N_PASSES ?? 4);
 const MAX_PASSES = process.env.LOOP_MAX_PASSES ? Number(process.env.LOOP_MAX_PASSES) : Infinity;
 
 async function main() {
   let pass = 0;
+
+  // Run slow path once on startup to ensure wallet scores are populated
+  console.log(`\n########## STARTUP: SLOW PATH (wallet refresh) @ ${new Date().toISOString()} ##########`);
+  try {
+    await runSlowPath();
+  } catch (e) {
+    console.error("startup slow path error:", (e as Error).message);
+  }
+
   while (pass < MAX_PASSES) {
     pass++;
     const start = Date.now();
-    console.log(`\n########## LOOP PASS ${pass} @ ${new Date().toISOString()} ##########`);
+    console.log(`\n########## FAST PASS ${pass} @ ${new Date().toISOString()} ##########`);
+
     try {
-      await runPipeline();
+      await runFastPath();
     } catch (e) {
-      console.error("pipeline error:", (e as Error).message);
+      console.error("fast path error:", (e as Error).message);
     }
+
+    // Run slow path every N passes
+    if (pass % SLOW_EVERY_N_PASSES === 0) {
+      console.log(`\n--- SLOW PATH (wallet refresh, pass ${pass}) ---`);
+      try {
+        await runSlowPath();
+      } catch (e) {
+        console.error("slow path error:", (e as Error).message);
+      }
+    }
+
     const elapsed = (Date.now() - start) / 1000;
-    console.log(`pass ${pass} took ${elapsed.toFixed(0)}s; sleeping ${(INTERVAL_MS / 1000).toFixed(0)}s`);
-    await new Promise((r) => setTimeout(r, INTERVAL_MS));
+    console.log(`pass ${pass} took ${elapsed.toFixed(0)}s; sleeping ${(FAST_INTERVAL_MS / 1000).toFixed(0)}s`);
+    await new Promise((r) => setTimeout(r, FAST_INTERVAL_MS));
   }
   console.log("loop finished");
 }

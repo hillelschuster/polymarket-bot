@@ -13,7 +13,10 @@ export async function runReportDaily(): Promise<void> {
   const winningPositions = openTrades.filter((t) => (t.unrealizedPnl ?? 0) > 0).length;
   const totalUnrealized = openTrades.reduce((s, t) => s + (t.unrealizedPnl ?? 0), 0);
   const resolved = await prisma.paperTrade.findMany({ where: { status: "resolved" } });
-  const totalPnl = resolved.reduce((s, t) => s + (t.realizedPnl ?? 0), 0);
+  const closedSL = await prisma.paperTrade.findMany({ where: { status: "closed" } });
+  const resolvedPnl = resolved.reduce((s, t) => s + (t.realizedPnl ?? 0), 0);
+  const stopLossPnl = closedSL.reduce((s, t) => s + (t.realizedPnl ?? 0), 0);
+  const totalPnl = resolvedPnl + stopLossPnl; // net realized (resolved + stop-lossed)
   const wins = resolved.filter((t) => (t.realizedPnl ?? 0) > 0).length;
   const winRate = resolved.length ? wins / resolved.length : 0;
 
@@ -131,17 +134,17 @@ export async function runReportDaily(): Promise<void> {
       ruleChangesJson: JSON.stringify(ruleChanges.map((rc) => ({ id: rc.id, reason: rc.reason }))),
       winningPositions,
       unrealizedPnl: totalUnrealized,
-      summary: `PnL: $${totalPnl.toFixed(2)} | Unrealized: $${totalUnrealized.toFixed(2)} | WinRate: ${(winRate * 100).toFixed(1)}% | Open: ${openPositions} | Winning: ${winningPositions} | BeatBlind: ${beatBlindCopy === null ? 'N/A' : beatBlindCopy} | BlindTrades: ${benchmark.blindCopy.count}`,
+      summary: `Net Realized: $${totalPnl.toFixed(2)} (resolved $${resolvedPnl.toFixed(2)} | stop-loss $${stopLossPnl.toFixed(2)}) | Unrealized: $${totalUnrealized.toFixed(2)} | Resolved WinRate: ${wins}/${resolved.length} (${(winRate * 100).toFixed(1)}%) | Open: ${openPositions} (in profit: ${winningPositions}) | BeatBlind: ${beatBlindCopy === null ? 'N/A' : beatBlindCopy}`,
     },
     update: {},
   });
 
   if (config.TELEGRAM_BOT_TOKEN && config.TELEGRAM_CHAT_ID) {
-    const msg = `<b>Daily Report</b>\nPnL: $${totalPnl.toFixed(2)}\nUnrealized: $${totalUnrealized.toFixed(2)}\nWinRate: ${(winRate * 100).toFixed(1)}%\nOpen: ${openPositions}\nWinning: ${winningPositions}\nCopied: ${copied}\nBeatBlind: ${beatBlindCopy === null ? 'N/A (no blind data)' : beatBlindCopy}\nBlindTrades: ${benchmark.blindCopy.count}`;
+    const msg = `<b>Daily Report</b>\nNet Realized: $${totalPnl.toFixed(2)} (resolved $${resolvedPnl.toFixed(2)} | SL $${stopLossPnl.toFixed(2)})\nUnrealized: $${totalUnrealized.toFixed(2)}\nResolved WinRate: ${wins}/${resolved.length} (${(winRate * 100).toFixed(1)}%)\nOpen: ${openPositions} (in profit: ${winningPositions})\nCopied: ${copied}\nBeatBlind: ${beatBlindCopy === null ? 'N/A' : beatBlindCopy}`;
     await sendMessage(msg);
     await prisma.dailyReport.update({ where: { id: report.id }, data: { sentToTelegram: true } });
   }
-  console.log(`reportDaily done: PnL=$${totalPnl.toFixed(2)} Unrealized=$${totalUnrealized.toFixed(2)} Winning=${winningPositions}/${openPositions} winRate=${(winRate * 100).toFixed(1)}%`);
+  console.log(`reportDaily done: NetRealized=$${totalPnl.toFixed(2)} (resolved=$${resolvedPnl.toFixed(2)} SL=$${stopLossPnl.toFixed(2)}) | Unrealized=$${totalUnrealized.toFixed(2)} | WinRate=${wins}/${resolved.length} (${(winRate * 100).toFixed(1)}%) | Open=${openPositions} (profit:${winningPositions})`);
 }
 
 if (require.main === module) runReportDaily().catch(console.error);
