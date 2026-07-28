@@ -24,6 +24,7 @@
     "pipeline": "tsx src/jobs/runAll.ts",
     "backtest": "tsx src/jobs/backtest.ts",
     "backtest:sports": "tsx src/jobs/backtestSportsFavorites.ts",
+    "research:wallet-universe": "tsx src/research/walletUniverseAudit.ts",
     "loop": "tsx src/jobs/loop.ts",
     "generate": "prisma generate",
     "test": "vitest run"
