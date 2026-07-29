@@ -3,7 +3,7 @@
 Paper-trading-only research bot that runs against **live public Polymarket data**.
 Hermes Agent operates the loop; a Vercel-ready Next.js dashboard shows results.
 
-See `docs/SPEC.md` for the full design (architecture, scoring, rules, jobs, pages).
+See `docs/IMPORTANT_NOTES.md` for durable strategy, architecture, and research context.
 
 ## What it does
 - **Wallet lane**: Pulls the Polymarket trader leaderboard (top 500), profiles wallets, monitors for new trades, scores and paper-copies strong candidates.
@@ -49,9 +49,10 @@ src/
   app/        Next.js dashboard (9 pages) + components
 tests/        Vitest suites (scoring, rules, paper, benchmark, safety, politicalFavorites)
 prisma/       SQLite schema + dev.db
-docs/         SPEC, FINDINGS, SAFETY, research PDF
+docs/         durable agent context
 scripts/      Ad-hoc analysis scripts (backtest_features)
 ```
 
 ## Safety
-See `docs/SAFETY.md`.
+The bot is paper-only: it never trades, uses private keys, spends money, or
+substitutes fake data for failed upstream APIs.

@@ -3,6 +3,7 @@ import type { GammaMarket, OrderBook } from "../src/adapters/polymarket.js";
 import { calendarDeadlineMs, findCalendarPairs } from "../src/lib/calendarArbitrage.js";
 import { quoteCalendarBasket } from "../src/lib/calendarExecution.js";
 import { takerFeePerShare } from "../src/lib/executableQuotes.js";
+import { prepareFokBuyOrder } from "../src/adapters/execution.js";
 import { applyMarketMessage, RealtimeOrderBook, worstAskForShares, worstBidForShares } from "../src/lib/realtimeOrderBook.js";
 
 function book(asset: string, bids: Array<[number, number]>, asks: Array<[number, number]>): OrderBook {
@@ -115,6 +116,32 @@ describe("fee-aware executable basket", () => {
       maxCombinedCost: 0.975,
       maxLegSpread: 0.02,
       minProfit: 0.1,
+    })).toBeNull();
+  });
+});
+
+describe("wallet-copy FOK preparation", () => {
+  it("uses the worst required ask and rejects a worse fresh quote", () => {
+    const orderBook = book("wallet-copy", [[0.59, 100]], [[0.60, 10], [0.61, 10]]);
+
+    const accepted = prepareFokBuyOrder({
+      tokenId: "wallet-copy",
+      book: orderBook,
+      fee: { rateBps: 0, exponent: 0 },
+      shares: 15,
+      maxCashCost: 9.1,
+      maxAllInPrice: 0.61,
+    });
+    expect(accepted?.leg.limitPrice).toBe(0.61);
+    expect(accepted?.quote.cashCost).toBeCloseTo(9.05, 8);
+
+    expect(prepareFokBuyOrder({
+      tokenId: "wallet-copy",
+      book: orderBook,
+      fee: { rateBps: 0, exponent: 0 },
+      shares: 15,
+      maxCashCost: 9.04,
+      maxAllInPrice: 0.61,
     })).toBeNull();
   });
 });

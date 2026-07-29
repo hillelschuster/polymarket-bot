@@ -18,6 +18,7 @@ import { runPaperUpdatePnl } from "./paperUpdatePnl.js";
 import { runReviewOutcomes } from "./reviewOutcomes.js";
 import { runUpdateRules } from "./updateRules.js";
 import { runReportDaily } from "./reportDaily.js";
+import { prisma } from "../lib/db.js";
 
 interface StepResult {
   name: string;
@@ -70,10 +71,24 @@ async function runSteps(steps: [string, () => Promise<void>, boolean][]): Promis
 /** Fast path only — detect and copy trades while signals are fresh. */
 export async function runFastPath(): Promise<PipelineResult> {
   const results = await runSteps(fastSteps);
+  await logPnlSnapshot().catch(() => {}); // never let the summary break the fast path
   const failedCritical = results.filter((r) => !r.success && r.critical).map((r) => r.name);
   const failedNonCritical = results.filter((r) => !r.success && !r.critical).map((r) => r.name);
   if (failedCritical.length) console.log(`FAST PATH CRITICAL FAILURES: ${failedCritical.join(", ")}`);
   return { success: !failedCritical.length, results, failedCritical, failedNonCritical };
+}
+
+/** One-line profitability snapshot so every fast pass shows current performance. */
+async function logPnlSnapshot(): Promise<void> {
+  const [open, closed] = await Promise.all([
+    prisma.paperTrade.aggregate({ where: { status: "open" }, _sum: { unrealizedPnl: true }, _count: true }),
+    prisma.paperTrade.aggregate({ where: { status: { in: ["resolved", "closed"] } }, _sum: { realizedPnl: true } }),
+  ]);
+  const realized = closed._sum.realizedPnl ?? 0;
+  const unrealized = open._sum.unrealizedPnl ?? 0;
+  console.log(
+    `PnL: net realized $${realized.toFixed(2)} | unrealized $${unrealized.toFixed(2)} (${open._count} open) | true total $${(realized + unrealized).toFixed(2)}`,
+  );
 }
 
 /** Slow path only — refresh wallet intelligence, rules, reports. */

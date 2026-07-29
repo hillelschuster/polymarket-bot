@@ -16,9 +16,9 @@ import { privateKeyToAccount } from "viem/accounts";
 import { polygon } from "viem/chains";
 import { assertLiveTradingConfigured, config } from "../lib/config.js";
 import type { FeeModel } from "./marketFees.js";
-import type { OrderBook } from "./polymarket.js";
-import { quoteSellSharesExact } from "../lib/executableQuotes.js";
-import { worstBidForShares } from "../lib/realtimeOrderBook.js";
+import type { BuyQuote, OrderBook } from "./polymarket.js";
+import { quoteBuySharesExact, quoteSellSharesExact } from "../lib/executableQuotes.js";
+import { worstAskForShares, worstBidForShares } from "../lib/realtimeOrderBook.js";
 
 export type LegSettlement = "confirmed" | "matched" | "pending" | "failed" | "unknown";
 
@@ -29,6 +29,11 @@ export interface ExactBuyLeg {
   estimatedCashCost: number;
   tickSize?: string;
   negRisk?: boolean;
+}
+
+export interface PreparedFokBuy {
+  leg: ExactBuyLeg;
+  quote: BuyQuote;
 }
 
 export interface UnwindResult {
@@ -170,6 +175,40 @@ function orderOptions(tickSize?: string, negRisk?: boolean): Partial<CreateOrder
   return Object.keys(options).length ? options : undefined;
 }
 
+/**
+ * Re-quote an already-approved wallet-copy size on the authenticated CLOB.
+ * The live order may only proceed at the original all-in price and cash budget
+ * or better. The FOK limit is the actual worst raw ask, never a fee-inclusive
+ * synthetic price.
+ */
+export function prepareFokBuyOrder(input: {
+  tokenId: string;
+  book: OrderBook;
+  fee: FeeModel;
+  shares: number;
+  maxCashCost: number;
+  maxAllInPrice: number;
+}): PreparedFokBuy | null {
+  if (!TICKS.has(String(input.book.tick_size))) return null;
+  const quote = quoteBuySharesExact(input.book, input.fee, input.shares);
+  const limitPrice = worstAskForShares(input.book, input.shares);
+  if (!quote || limitPrice == null) return null;
+  if (quote.cashCost > input.maxCashCost + 0.005) return null;
+  if (quote.allInPrice > input.maxAllInPrice + 1e-8) return null;
+
+  return {
+    quote,
+    leg: {
+      tokenId: input.tokenId,
+      shares: input.shares,
+      limitPrice,
+      estimatedCashCost: quote.cashCost,
+      tickSize: input.book.tick_size,
+      negRisk: input.book.neg_risk,
+    },
+  };
+}
+
 function toBook(raw: OrderBookSummary): OrderBook {
   return {
     market: raw.market,
@@ -190,6 +229,59 @@ async function liveFeeModel(trading: ClobClient, tokenId: string): Promise<FeeMo
     trading.getFeeExponent(tokenId),
   ]);
   return { rateBps, exponent };
+}
+
+export interface FokBuyResult {
+  status: "filled" | "not_filled" | "unknown";
+  state?: LegSettlement;
+  response?: OrderResponse;
+  prepared?: PreparedFokBuy;
+  error?: string;
+}
+
+/** One exact-share FOK buy. Any ambiguous result is fail-closed as unknown. */
+export async function executeFokBuy(input: {
+  tokenId: string;
+  shares: number;
+  maxCashCost: number;
+  maxAllInPrice: number;
+}): Promise<FokBuyResult> {
+  try {
+    const trading = getTradingClient();
+    const [rawBook, fee] = await Promise.all([
+      trading.getOrderBook(input.tokenId),
+      liveFeeModel(trading, input.tokenId),
+    ]);
+    const prepared = prepareFokBuyOrder({
+      tokenId: input.tokenId,
+      book: toBook(rawBook),
+      fee,
+      shares: input.shares,
+      maxCashCost: input.maxCashCost,
+      maxAllInPrice: input.maxAllInPrice,
+    });
+    if (!prepared) return { status: "not_filled", error: "fresh CLOB quote exceeds approved limits" };
+
+    const signed = await trading.createOrder(
+      {
+        tokenID: prepared.leg.tokenId,
+        price: prepared.leg.limitPrice,
+        size: prepared.leg.shares,
+        side: Side.BUY,
+      },
+      orderOptions(prepared.leg.tickSize, prepared.leg.negRisk),
+    );
+    const response = asOrderResponse(await trading.postOrder(signed, OrderType.FOK, false, true));
+    const state = await settleQuick(response, 1_500);
+    if (held(state)) return { status: "filled", state, response, prepared };
+    if (state === "failed") return { status: "not_filled", state, response, prepared };
+    return { status: "unknown", state, response, prepared, error: `FOK order state ${state}` };
+  } catch (error) {
+    return {
+      status: "unknown",
+      error: error instanceof Error ? error.message : String(error),
+    };
+  }
 }
 
 export async function unwindExactShares(leg: ExactBuyLeg, attempts = 20): Promise<UnwindResult> {

@@ -8,69 +8,69 @@ datasource db {
 }
 
 model LeaderboardScan {
-  id             String         @id @default(cuid())
+  id             String          @id @default(cuid())
   source         String
   scannedAt      DateTime
   walletCount    Int
   lookbackDays   Int
   rawSummaryJson String
-  createdAt      DateTime       @default(now())
+  createdAt      DateTime        @default(now())
   wallets        WalletProfile[]
 }
 
 model WalletProfile {
-  id                   String           @id @default(cuid())
-  address              String           @unique
-  label                String?
-  sourceRank           Int?
-  status               String // track | watch | ignore
-  roi30d               Float?
-  consistencyScore     Float?
-  copyabilityScore     Float?
-  oneHitWonderPenalty  Float?
-  globalScore          Float?
-  bestCategory         String?
+  id                    String           @id @default(cuid())
+  address               String           @unique
+  label                 String?
+  sourceRank            Int?
+  status                String // track | watch | ignore
+  roi30d                Float?
+  consistencyScore      Float?
+  copyabilityScore      Float?
+  oneHitWonderPenalty   Float?
+  globalScore           Float?
+  bestCategory          String?
   categoryStrengthsJson String?
-  scoreComponentsJson  String?
-  averageTradeSize     Float?
-  tradeCount30d        Int?
+  scoreComponentsJson   String?
+  averageTradeSize      Float?
+  tradeCount30d         Int?
   resolvedTradeCount30d Int?
-  winRate30d           Float?
-  averageLiquidity     Float?
-  averageSpread        Float?
-  averageEntryTiming   Float?
-  copyabilityNotes     String?
-  riskNotes            String?
-  lastScannedAt        DateTime?
-  createdAt            DateTime         @default(now())
-  updatedAt            DateTime         @updatedAt
-  scanId               String?
-  scan                 LeaderboardScan? @relation(fields: [scanId], references: [id])
-  observedTrades       ObservedTrade[]
+  winRate30d            Float?
+  averageLiquidity      Float?
+  averageSpread         Float?
+  averageEntryTiming    Float?
+  copyabilityNotes      String?
+  riskNotes             String?
+  lastScannedAt         DateTime?
+  createdAt             DateTime         @default(now())
+  updatedAt             DateTime         @updatedAt
+  scanId                String?
+  scan                  LeaderboardScan? @relation(fields: [scanId], references: [id])
+  observedTrades        ObservedTrade[]
 }
 
 model ObservedTrade {
-  id              String           @id @default(cuid())
-  walletAddress   String
-  marketId        String
-  conditionId     String?
-  slug            String?
-  tokenId         String?
-  marketQuestion  String?
-  marketCategory  String?
-  marketLiquidity Float?
-  marketSpread    Float?
-  outcome         String?
-  outcomeIndex    Int?
-  side            String?
+  id               String           @id @default(cuid())
+  walletAddress    String
+  marketId         String
+  conditionId      String?
+  slug             String?
+  tokenId          String?
+  marketQuestion   String?
+  marketCategory   String?
+  marketLiquidity  Float?
+  marketSpread     Float?
+  outcome          String?
+  outcomeIndex     Int?
+  side             String?
   walletEntryPrice Float?
-  detectedPrice   Float?
-  size            Float?
-  timestamp       DateTime?
-  rawTradeJson    String?
-  createdAt       DateTime         @default(now())
-  wallet          WalletProfile?   @relation(fields: [walletAddress], references: [address])
-  decision        DecisionJournal?
+  detectedPrice    Float?
+  size             Float?
+  timestamp        DateTime?
+  rawTradeJson     String?
+  createdAt        DateTime         @default(now())
+  wallet           WalletProfile?   @relation(fields: [walletAddress], references: [address])
+  decision         DecisionJournal?
 }
 
 model MarketSnapshot {
@@ -93,87 +93,88 @@ model MarketSnapshot {
 }
 
 model DecisionJournal {
-  id                 String        @id @default(cuid())
-  observedTradeId    String        @unique
-  walletAddress      String
-  marketId           String
-  decision           String // paper_copy | watchlist | skip
-  copyScore          Float?
-  confidence         Float?
-  reasonsJson        String?
-  risksJson          String?
-  walletQualityScore Float?
-  roiScore           Float?
-  consistencyScore   Float?
-  copyabilityScore   Float?
-  categoryFitScore   Float?
-  entryTimingScore   Float?
-  spreadScore        Float?
-  liquidityScore     Float?
-  thesisScore        Float?
+  id                    String         @id @default(cuid())
+  observedTradeId       String         @unique
+  walletAddress         String
+  marketId              String
+  decision              String // paper_copy | watchlist | skip
+  copyScore             Float?
+  confidence            Float?
+  reasonsJson           String?
+  risksJson             String?
+  walletQualityScore    Float?
+  roiScore              Float?
+  consistencyScore      Float?
+  copyabilityScore      Float?
+  categoryFitScore      Float?
+  entryTimingScore      Float?
+  spreadScore           Float?
+  liquidityScore        Float?
+  thesisScore           Float?
   simulatedPositionSize Float?
-  createdAt          DateTime      @default(now())
-  observedTrade      ObservedTrade? @relation(fields: [observedTradeId], references: [id])
-  outcomeReview      OutcomeReview?
-  paperTrade         PaperTrade?
+  createdAt             DateTime       @default(now())
+  observedTrade         ObservedTrade? @relation(fields: [observedTradeId], references: [id])
+  outcomeReview         OutcomeReview?
+  paperTrade            PaperTrade?
+  liveOrder             LiveOrder?
 }
 
 model PaperTrade {
-  id                  String         @id @default(cuid())
-  decisionJournalId   String?        @unique
-  walletAddress       String
-  marketId         String
-  slug             String?
-  tokenId          String?
-  outcome             String?
-  side                String?
-  entryPrice          Float?
-  currentPrice        Float?
+  id                    String           @id @default(cuid())
+  decisionJournalId     String?          @unique
+  walletAddress         String
+  marketId              String
+  slug                  String?
+  tokenId               String?
+  outcome               String?
+  side                  String?
+  entryPrice            Float?
+  currentPrice          Float?
   simulatedPositionSize Float?
-  unrealizedPnl       Float?
-  realizedPnl         Float?
-  status              String // open | closed | resolved
-  source              String         @default("wallet_copy") // wallet_copy | strategy
-  strategySignalId    String?
-  openedAt            DateTime       @default(now())
-  closedAt            DateTime?
-  resolvedAt          DateTime?
-  decisionJournal     DecisionJournal? @relation(fields: [decisionJournalId], references: [id])
-  pnlSnapshots        PnlSnapshot[]
+  unrealizedPnl         Float?
+  realizedPnl           Float?
+  status                String // open | closed | resolved
+  source                String           @default("wallet_copy") // wallet_copy | strategy
+  strategySignalId      String?
+  openedAt              DateTime         @default(now())
+  closedAt              DateTime?
+  resolvedAt            DateTime?
+  decisionJournal       DecisionJournal? @relation(fields: [decisionJournalId], references: [id])
+  pnlSnapshots          PnlSnapshot[]
 }
 
 model PnlSnapshot {
-  id          String      @id @default(cuid())
+  id           String      @id @default(cuid())
   paperTradeId String
-  price       Float?
-  pnl         Float?
-  collectedAt DateTime    @default(now())
-  paperTrade  PaperTrade? @relation(fields: [paperTradeId], references: [id])
+  price        Float?
+  pnl          Float?
+  collectedAt  DateTime    @default(now())
+  paperTrade   PaperTrade? @relation(fields: [paperTradeId], references: [id])
 }
 
 model OutcomeReview {
-  id               String          @id @default(cuid())
-  decisionJournalId String          @unique
-  paperTradeId     String?
-  reviewTime       DateTime        @default(now())
-  priceAfter1h     Float?
-  priceAfter6h     Float?
-  priceAfter24h    Float?
-  finalOutcome     Float?
-  simulatedPnl     Float?
-  wasDecisionGood  Boolean?
-  lessonsJson      String?
-  createdAt        DateTime        @default(now())
-  decisionJournal  DecisionJournal? @relation(fields: [decisionJournalId], references: [id])
+  id                String           @id @default(cuid())
+  decisionJournalId String           @unique
+  paperTradeId      String?
+  reviewTime        DateTime         @default(now())
+  priceAfter1h      Float?
+  priceAfter6h      Float?
+  priceAfter24h     Float?
+  finalOutcome      Float?
+  simulatedPnl      Float?
+  wasDecisionGood   Boolean?
+  lessonsJson       String?
+  createdAt         DateTime         @default(now())
+  decisionJournal   DecisionJournal? @relation(fields: [decisionJournalId], references: [id])
 }
 
 model RuleSet {
-  id        String       @id @default(cuid())
-  version   Int
-  active    Boolean      @default(false)
-  rulesJson String
-  createdAt DateTime     @default(now())
-  updatedAt DateTime     @updatedAt
+  id           String       @id @default(cuid())
+  version      Int
+  active       Boolean      @default(false)
+  rulesJson    String
+  createdAt    DateTime     @default(now())
+  updatedAt    DateTime     @updatedAt
   changesAsOld RuleChange[] @relation("old")
   changesAsNew RuleChange[] @relation("new")
 }
@@ -190,6 +191,35 @@ model RuleChange {
   createdAt       DateTime @default(now())
   oldRuleSet      RuleSet? @relation("old", fields: [oldRuleSetId], references: [id])
   newRuleSet      RuleSet? @relation("new", fields: [newRuleSetId], references: [id])
+}
+
+model LiveOrder {
+  id                String           @id @default(cuid())
+  decisionJournalId String           @unique
+  walletAddress     String
+  marketId          String
+  slug              String?
+  tokenId           String?
+  side              String           @default("BUY")
+  cashBudget        Float?
+  paperAllInPrice   Float?
+  shares            Float?
+  quoteCashCost     Float?
+  quoteAllInPrice   Float?
+  quoteFee          Float?
+  limitPrice        Float?
+  status            String           @default("submitted") // blocked_cap | submitted | open | not_filled | unknown | resolved
+  orderState        String?
+  orderId           String?
+  transactionHash   String?
+  responseJson      String?
+  error             String?
+  filledAt          DateTime?
+  resolvedAt        DateTime?
+  realizedPnl       Float?
+  createdAt         DateTime         @default(now())
+  updatedAt         DateTime         @updatedAt
+  decisionJournal   DecisionJournal? @relation(fields: [decisionJournalId], references: [id])
 }
 
 model StrategySignal {

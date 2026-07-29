@@ -20,6 +20,8 @@
     "review:outcomes": "tsx src/jobs/reviewOutcomes.ts",
     "update:rules": "tsx src/jobs/updateRules.ts",
     "report:daily": "tsx src/jobs/reportDaily.ts",
+    "diag:universe": "tsx scripts/universeDiagnostic.ts",
+    "diag:baseline": "tsx scripts/setBaseline.ts",
     "pipeline": "tsx src/jobs/runAll.ts",
     "backtest": "tsx src/jobs/backtest.ts",
     "backtest:sports": "tsx src/jobs/backtestSportsFavorites.ts",

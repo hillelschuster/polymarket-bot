@@ -7,6 +7,8 @@ import { prisma } from "../lib/db.js";
 import { scoreTradeByMarket, DEFAULT_RULES, walletCopySkipReason, categoryFromSlug, getFavoriteGate, type RuleSetValues } from "../lib/scoring.js";
 import { createPaperTrade } from "../lib/paper.js";
 import { getMarketBySlug, getExecutableBuyQuote } from "../adapters/polymarket.js";
+import { realTradingEnabled } from "../lib/config.js";
+import { executeWalletCopyOrder } from "../lib/liveExecution.js";
 
 // --- Constants ---
 const MAX_SIGNAL_AGE_MS = 10 * 60 * 1000; // 10 minutes — default for non-sports
@@ -113,6 +115,7 @@ export async function runScoreTrades(): Promise<void> {
   let rejectedGates = 0;
 
   for (const ot of unscored) {
+    try {
     const walletGlobalScore = ot.wallet?.globalScore ?? 50;
     // --- GATE 0: Only BUY is supported (we buy outcome tokens; SELL is fictional) ---
     const side = (ot.side ?? "BUY").toUpperCase();
@@ -433,6 +436,34 @@ export async function runScoreTrades(): Promise<void> {
     existingCopies.add(dedupKey);
     copied++;
     console.log(`  COPY: ${ot.slug?.slice(0, 35)} @ ${quote.allInPrice.toFixed(4)} (ask=${quote.bestAsk?.toFixed(3)} fee=${quote.fee.toFixed(4)} delay=${signalDelaySec?.toFixed(0)}s $${cashBudget})`);
+
+    // --- LIVE EXECUTION: one-path FOK buy, durable idempotency ---
+    // Paper trade is already saved. Live order is a side effect; failures are
+    // logged and persisted but do NOT roll back the paper record (parity audit).
+    if (realTradingEnabled && ot.tokenId && quote) {
+      try {
+        await executeWalletCopyOrder({
+          tokenId: ot.tokenId,
+          cashBudget,
+          allInPrice: quote.allInPrice,
+          shares: quote.shares,
+          decisionJournalId: dj.id,
+          walletAddress: ot.walletAddress,
+          marketId: ot.marketId,
+          slug: ot.slug ?? null,
+        });
+      } catch (err) {
+        console.error(
+          `Lane A live exec failed (dj=${dj.id}):`,
+          (err as Error).message,
+        );
+      }
+    }
+    } catch (err: any) {
+      // Gracefully skip trades already scored (unique constraint on observedTradeId)
+      if (err?.code === "P2002") continue;
+      throw err;
+    }
   }
 
   console.log(`scoreTrades done: ${unscored.length} scored, ${copied} paper_copy, ${rejectedStale} stale, ${rejectedNoQuote} no-quote, ${rejectedDedup} dedup, ${rejectedGates} gates`);

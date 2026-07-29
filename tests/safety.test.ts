@@ -27,4 +27,15 @@ describe("live execution gate", () => {
       .replace(/\/\*[\s\S]*?\*\//g, "");
     expect(source).not.toMatch(/fetch|axios|http:\/\/|https:\/\/|\.send\(|WebSocket/i);
   });
+
+  it("loads the Lane A live module without placing an order", async () => {
+    const { executeWalletCopyOrder } = await import("../src/lib/liveExecution.js");
+    expect(typeof executeWalletCopyOrder).toBe("function");
+  }, 15_000);
+
+  it("loads the live-resolution lifecycle without touching an order", async () => {
+    const { runReviewOutcomes } = await import("../src/jobs/reviewOutcomes.js");
+    expect(typeof runReviewOutcomes).toBe("function");
+  }, 15_000);
+
 });

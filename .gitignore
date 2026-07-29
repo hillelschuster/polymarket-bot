@@ -10,3 +10,7 @@ prisma/migrations
 data/backtests/
 .qoder
 .opencode
+
+# local artifacts
+tmp_*
+baseline.json

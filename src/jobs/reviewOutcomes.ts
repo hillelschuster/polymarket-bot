@@ -99,6 +99,23 @@ export async function runReviewOutcomes(): Promise<void> {
         },
       });
 
+      // A real wallet-copy position has the same binary settlement as its
+      // paper decision. Mark it resolved so its cash no longer counts toward
+      // the live exposure cap and retain realized execution PnL for review.
+      if (pt.decisionJournal) {
+        const live = await prisma.liveOrder.findUnique({
+          where: { decisionJournalId: pt.decisionJournal.id },
+        });
+        if (live?.status === "open") {
+          const realizedPnl = (live.shares ?? 0) * settlementPrice
+            - (live.quoteCashCost ?? live.cashBudget ?? 0);
+          await prisma.liveOrder.update({
+            where: { id: live.id },
+            data: { status: "resolved", resolvedAt: new Date(), realizedPnl },
+          });
+        }
+      }
+
       if (pt.decisionJournal) {
         await prisma.outcomeReview.create({
           data: {
