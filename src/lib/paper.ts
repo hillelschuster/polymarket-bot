@@ -25,12 +25,14 @@ export interface PaperTrade {
 }
 
 /**
- * Create a paper trade. Size = $5 + ($15 * confidence), clamped to [$5, $20].
+ * Create a paper trade. Size = explicitSize if given, else $5 + ($15 * confidence).
  * Never executes — returns a pure data object.
  */
-export function createPaperTrade(signal: PaperSignal, confidence: number): PaperTrade {
+export function createPaperTrade(signal: PaperSignal, confidence: number, explicitSize?: number): PaperTrade {
   const c = Math.max(0, Math.min(1, confidence));
-  const size = Math.round((5 + 15 * c) * 100) / 100; // $5–$20
+  const size = explicitSize != null
+    ? Math.round(explicitSize * 100) / 100
+    : Math.round((5 + 15 * c) * 100) / 100; // $5–$20
   return {
     walletAddress: signal.walletAddress,
     marketId: signal.marketId,

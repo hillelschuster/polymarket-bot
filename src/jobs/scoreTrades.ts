@@ -4,7 +4,7 @@
 // Gamma midpoints are NEVER used as entry. If the orderbook is unavailable,
 // the trade is skipped. This makes every future observation trustworthy.
 import { prisma } from "../lib/db.js";
-import { scoreTradeByMarket, DEFAULT_RULES, walletCopySkipReason, categoryFromSlug, getFavoriteGate, type RuleSetValues } from "../lib/scoring.js";
+import { scoreTradeByMarket, DEFAULT_RULES, walletCopySkipReason, categoryFromSlug, segmentFromSlug, segmentSize, getFavoriteGate, type RuleSetValues, type MarketSegment } from "../lib/scoring.js";
 import { createPaperTrade } from "../lib/paper.js";
 import { getMarketBySlug, getExecutableBuyQuote } from "../adapters/polymarket.js";
 import { realTradingEnabled } from "../lib/config.js";
@@ -71,28 +71,44 @@ export async function runScoreTrades(): Promise<void> {
     await new Promise((r) => setTimeout(r, 120));
   }
 
-  // Wallet copy track record (per wallet+side)
+  // Wallet copy track record — CLEAN METRICS:
+  // Skill: only source="wallet_copy" + status="resolved" (terminal outcomes).
+  // Open: counted separately for exposure cap only.
+  // Legacy stop-loss ("closed") and strategy trades are EXCLUDED from skill.
+  // Keyed by wallet|segment (not wallet|side) so tennis losses don't poison MLB skill.
   const allCopies = await prisma.paperTrade.findMany({
-    select: { walletAddress: true, side: true, unrealizedPnl: true, realizedPnl: true, status: true, marketId: true, tokenId: true },
+    select: { walletAddress: true, side: true, unrealizedPnl: true, realizedPnl: true, status: true, marketId: true, tokenId: true, slug: true, source: true, simulatedPositionSize: true },
   });
   const copyPerf = new Map<string, { count: number; winRate: number; avgPnl: number; wins: number }>();
   const walletTotalPnl = new Map<string, number>();
   const walletOpenCount = new Map<string, number>();
-  // Persistent dedup set: marketId+tokenId pairs we already have open/resolved copies for
+  // Persistent dedup set: marketId+tokenId pairs we already have copies for (ALL statuses)
   const existingCopies = new Set<string>();
+  // Per-event (slug) exposure tracking for the $20-per-event cap
+  const eventExposure = new Map<string, number>();
   for (const c of allCopies) {
-    const side = c.side ?? "BUY";
-    const pnl = c.status !== "open" ? (c.realizedPnl ?? 0) : (c.unrealizedPnl ?? 0);
-    const k = `${c.walletAddress}|${side}`;
+    // Dedup uses ALL trades (correct — never re-copy the same market+token)
+    existingCopies.add(`${c.marketId}|${c.tokenId}`);
+    // Event exposure counts ALL non-open trades (deployed capital)
+    if (c.status !== "open" && c.slug) {
+      eventExposure.set(c.slug, (eventExposure.get(c.slug) ?? 0) + (c.simulatedPositionSize ?? 0));
+    }
+    // Open count: all open trades (for diversification cap)
+    if (c.status === "open") {
+      walletOpenCount.set(c.walletAddress, (walletOpenCount.get(c.walletAddress) ?? 0) + 1);
+      if (c.slug) eventExposure.set(c.slug, (eventExposure.get(c.slug) ?? 0) + (c.simulatedPositionSize ?? 0));
+    }
+    // SKILL METRICS: only resolved wallet-copy trades
+    if (c.source !== "wallet_copy" || c.status !== "resolved") continue;
+    const pnl = c.realizedPnl ?? 0;
+    const segment = segmentFromSlug(c.slug);
+    const k = `${c.walletAddress}|${segment}`;
     const e = copyPerf.get(k) ?? { count: 0, winRate: 0, avgPnl: 0, wins: 0 };
     e.count++;
     e.avgPnl += pnl;
     if (pnl > 0) e.wins++;
     copyPerf.set(k, e);
     walletTotalPnl.set(c.walletAddress, (walletTotalPnl.get(c.walletAddress) ?? 0) + pnl);
-    if (c.status === "open") walletOpenCount.set(c.walletAddress, (walletOpenCount.get(c.walletAddress) ?? 0) + 1);
-    // Track existing copies for persistent dedup (ALL statuses — not just open)
-    existingCopies.add(`${c.marketId}|${c.tokenId}`);
   }
   for (const e of copyPerf.values()) {
     e.avgPnl /= e.count;
@@ -132,6 +148,7 @@ export async function runScoreTrades(): Promise<void> {
     }
     const category = ot.marketCategory ?? categoryFromSlug(ot.slug) ?? null;
     const isSports = category === "sports";
+    const segment: MarketSegment = segmentFromSlug(ot.slug);
 
     // --- GATE 1: Signal age (sports get 20 min; everything else 10 min) ---
     const maxAge = isSports ? SPORTS_SIGNAL_AGE_MS : MAX_SIGNAL_AGE_MS;
@@ -162,11 +179,11 @@ export async function runScoreTrades(): Promise<void> {
       });
       continue;
     }
-    const perf = copyPerf.get(`${ot.walletAddress}|${side}`);
+    const perf = copyPerf.get(`${ot.walletAddress}|${segment}`);
     const totalPnl = walletTotalPnl.get(ot.walletAddress) ?? 0;
     const openCount = walletOpenCount.get(ot.walletAddress) ?? 0;
     const skipReason = walletCopySkipReason(
-      { side, count: perf?.count ?? 0, avgPnl: perf?.avgPnl ?? 0, winRate: perf?.winRate ?? 0, totalPnl, openCount },
+      { segment, count: perf?.count ?? 0, avgPnl: perf?.avgPnl ?? 0, winRate: perf?.winRate ?? 0, totalPnl, openCount },
       rules,
     );
     if (skipReason) {
@@ -302,12 +319,29 @@ export async function runScoreTrades(): Promise<void> {
       continue;
     }
 
-    // --- GATE 5: Calculate position size FIRST, then quote exact amount ---
+    // --- GATE 5: Segment-aware sizing + per-event exposure cap ---
+    const baseSize = segmentSize(segment);
+    const slugKey = ot.slug ?? ot.marketId;
+    const alreadyDeployed = eventExposure.get(slugKey) ?? 0;
+    const MAX_PER_EVENT = 20;
+    const remainingEventBudget = Math.max(0, MAX_PER_EVENT - alreadyDeployed);
+    const cashBudget = Math.min(baseSize, remainingEventBudget);
+    if (cashBudget < 1) {
+      await prisma.decisionJournal.create({
+        data: {
+          observedTradeId: ot.id, walletAddress: ot.walletAddress, marketId: ot.marketId,
+          decision: "skip", copyScore: 0,
+          reasonsJson: JSON.stringify([`event exposure cap: $${alreadyDeployed.toFixed(0)} already deployed on ${slugKey.slice(0, 30)} (max $${MAX_PER_EVENT})`, LOGIC_VERSION]),
+          walletQualityScore: walletGlobalScore,
+        },
+      });
+      continue;
+    }
+    // Confidence for paper.ts (used only if explicitSize is not passed; kept for journal metadata)
     let confidence = mkt.score / 100;
     if (perf && perf.count >= rules.minWalletCopyCount && perf.avgPnl > 0) {
       confidence = Math.min(1, 0.6 + perf.avgPnl * 3);
     }
-    const cashBudget = Math.round((5 + 15 * Math.max(0, Math.min(1, confidence))) * 100) / 100;
 
     // --- GATE 6: CLOB executable quote (FAIL-CLOSED: no quote = no trade) ---
     if (!ot.tokenId) {
@@ -389,6 +423,7 @@ export async function runScoreTrades(): Promise<void> {
     const pt = createPaperTrade(
       { walletAddress: ot.walletAddress, marketId: ot.marketId, outcome: ot.outcome ?? "YES", side, entryPrice: quote.allInPrice },
       confidence,
+      cashBudget, // explicit segment-aware size
     );
 
     const dj = await prisma.decisionJournal.create({
@@ -434,6 +469,8 @@ export async function runScoreTrades(): Promise<void> {
     });
 
     existingCopies.add(dedupKey);
+    // Track event exposure for the per-event cap
+    eventExposure.set(slugKey, alreadyDeployed + cashBudget);
     copied++;
     console.log(`  COPY: ${ot.slug?.slice(0, 35)} @ ${quote.allInPrice.toFixed(4)} (ask=${quote.bestAsk?.toFixed(3)} fee=${quote.fee.toFixed(4)} delay=${signalDelaySec?.toFixed(0)}s $${cashBudget})`);
 

@@ -140,6 +140,7 @@ const CATEGORY_PREFIXES: Record<string, string> = {
   ucl: "sports", mex: "sports", mls: "sports", fifa: "sports", fifwc: "sports",
   wnba: "sports", ncaaf: "sports", ncaab: "sports", tennis: "sports", golf: "sports",
   ufc: "sports", boxing: "sports", f1: "sports", nascar: "sports",
+  wta: "sports", atp: "sports", itf: "sports", challenger: "sports",
   dota2: "esports", lol: "esports", cs2: "esports", csgo: "esports", val: "esports",
   valorant: "esports", overwatch: "esports", rl: "esports",
   crypto: "crypto", btc: "crypto", eth: "crypto", sol: "crypto", xrp: "crypto",
@@ -149,6 +150,39 @@ export function categoryFromSlug(slug?: string | null): string | null {
   if (!slug) return null;
   const tok = slug.split("-")[0].toLowerCase();
   return CATEGORY_PREFIXES[tok] ?? null;
+}
+
+// --- Market segment for sizing and wallet-skill segmentation ---
+export type MarketSegment = "sports_mainline" | "sports_derivative" | "tennis" | "other";
+
+const TENNIS_PREFIXES = new Set(["wta", "atp", "itf", "challenger"]);
+const DERIVATIVE_KEYWORDS = ["spread", "total", "totals", "set", "prop", "over", "under", "handicap", "run-line", "puck-line", "point-spread"];
+const MAINLINE_PREFIXES = new Set(["mlb", "ufc", "f1", "nba", "nfl", "nhl", "boxing", "nascar", "golf", "epl", "ucl", "mls", "wnba", "ncaaf", "ncaab", "fifa", "fifwc", "mex"]);
+
+/** Classify a market slug into a sizing/skill segment. */
+export function segmentFromSlug(slug?: string | null): MarketSegment {
+  if (!slug) return "other";
+  const s = slug.toLowerCase();
+  const prefix = s.split("-")[0];
+  // Tennis is its own segment (roughly market-efficient per audit)
+  if (TENNIS_PREFIXES.has(prefix)) return "tennis";
+  // Sports derivatives: spreads, totals, props
+  const cat = CATEGORY_PREFIXES[prefix];
+  if (cat === "sports") {
+    if (DERIVATIVE_KEYWORDS.some((k) => s.includes(k))) return "sports_derivative";
+    return "sports_mainline";
+  }
+  return "other";
+}
+
+/** Deterministic segment-aware position size (dollars). */
+export function segmentSize(segment: MarketSegment): number {
+  switch (segment) {
+    case "sports_mainline": return 20;
+    case "sports_derivative": return 5;
+    case "tennis": return 5;
+    default: return 5;
+  }
 }
 
 /**
@@ -383,13 +417,13 @@ export function scoreTrade(
   return { score: Math.round(mkt.score), decision: "paper_copy", reasons: mkt.reasons };
 }
 
-/** Track record for one (wallet, side) pair, used by the copy-performance filter. */
+/** Track record for one (wallet, segment) pair, used by the copy-performance filter. */
 export interface WalletCopyRecord {
-  side: string;
-  count: number;          // copies of this (wallet, side)
-  avgPnl: number;         // average unrealized PnL per copy
-  winRate: number;        // fraction of copies with pnl > 0
-  totalPnl: number;       // wallet's TOTAL copy PnL across all sides (catastrophic-loss stop)
+  segment: string;        // market segment (sports_mainline, tennis, etc.)
+  count: number;          // resolved wallet-copy trades in this segment
+  avgPnl: number;         // average realized PnL per resolved trade
+  winRate: number;        // fraction of resolved trades with pnl > 0
+  totalPnl: number;       // wallet's TOTAL resolved wallet-copy PnL (catastrophic-loss stop)
   openCount: number;      // wallet's open copy count (diversification cap)
 }
 
@@ -404,12 +438,12 @@ export interface WalletCopyRecord {
  */
 export function walletCopySkipReason(rec: WalletCopyRecord, rules = DEFAULT_RULES): string | null {
   if (rec.totalPnl < rules.maxWalletLoss)
-    return `wallet total copy PnL $${rec.totalPnl.toFixed(2)} < ${rules.maxWalletLoss} (catastrophic-loss stop)`;
+    return `wallet resolved PnL $${rec.totalPnl.toFixed(2)} < ${rules.maxWalletLoss} (catastrophic-loss stop)`;
   if (rec.openCount >= rules.maxCopiesPerWallet)
     return `wallet already has ${rec.openCount} open copies (diversification cap)`;
   if (rec.count >= rules.minWalletCopyCount && rec.winRate < rules.minWalletCopyWinRate)
-    return `${rec.side} copies winRate ${(rec.winRate * 100).toFixed(0)}% < ${(rules.minWalletCopyWinRate * 100).toFixed(0)}% over ${rec.count} copies`;
+    return `${rec.segment} winRate ${(rec.winRate * 100).toFixed(0)}% < ${(rules.minWalletCopyWinRate * 100).toFixed(0)}% over ${rec.count} resolved`;
   if (rec.count >= rules.minWalletCopyCount && rec.avgPnl < 0)
-    return `${rec.side} copies avg PnL $${rec.avgPnl.toFixed(2)} < 0 over ${rec.count} copies`;
+    return `${rec.segment} avg PnL $${rec.avgPnl.toFixed(2)} < 0 over ${rec.count} resolved`;
   return null;
 }

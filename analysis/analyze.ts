@@ -16,7 +16,7 @@ const prisma = new PrismaClient();
 function inferCategory(slug: string | null): string {
   if (!slug) return "unknown";
   const s = slug.toLowerCase();
-  const sports = ["nba", "mlb", "nhl", "nfl", "soccer", "football", "tennis", "ufc", "golf", "cricket", "rugby", "boxing", "f1", "nascar", "wnba", "mls", "epl", "la-liga", "bundesliga", "serie-a", "ligue-1", "champions-league", "world-cup", "super-bowl", "world-series", "stanley-cup", "march-madness", "ncaa", "college"];
+  const sports = ["nba", "mlb", "nhl", "nfl", "soccer", "football", "tennis", "ufc", "golf", "cricket", "rugby", "boxing", "f1", "nascar", "wnba", "mls", "epl", "la-liga", "bundesliga", "serie-a", "ligue-1", "champions-league", "world-cup", "super-bowl", "world-series", "stanley-cup", "march-madness", "ncaa", "college", "wta", "atp", "itf", "challenger"];
   const politics = ["president", "election", "senate", "congress", "trump", "biden", "harris", "governor", "mayor", "primary", "nominee", "impeach", "supreme-court", "scotus", "fed-chair", "tariff", "government", "shutdown", "bill", "act", "law", "policy", "vote", "ballot", "campaign", "political", "democrat", "republican", "gop", "parliament", "brexit", "geopolit"];
   const crypto = ["bitcoin", "btc", "ethereum", "eth", "crypto", "solana", "sol", "dogecoin", "doge", "xrp", "token", "defi", "blockchain", "binance", "coinbase"];
   const macro = ["cpi", "inflation", "gdp", "fed", "rate-cut", "interest-rate", "unemployment", "jobs-report", "nonfarm", "fomc", "treasury", "recession"];
@@ -44,6 +44,7 @@ interface TradeRow {
   wallet: string;
   slug: string;
   category: string;
+  source: string;
   side: string;
   entry: number;
   cash: number;
@@ -88,6 +89,7 @@ async function main() {
       wallet: t.walletAddress,
       slug: t.slug ?? "",
       category: cat,
+      source: t.source,
       side: t.side ?? "BUY",
       entry,
       cash,
@@ -189,9 +191,9 @@ async function main() {
   const avgPnlDiff = pnlDiffs.length ? pnlDiffs.reduce((a, b) => a + b, 0) / pnlDiffs.length : 0;
 
   // ===================== WRITE CSV =====================
-  const csvHeader = "id,wallet,slug,category,side,entryPrice,cashSize,status,dbPnl,verifyPnl,won,isStopLoss,openedAt,closedAt,day";
+  const csvHeader = "id,wallet,slug,category,source,side,entryPrice,cashSize,status,dbPnl,verifyPnl,won,isStopLoss,openedAt,closedAt,day";
   const csvRows = rows.map((r) =>
-    [r.id, r.wallet, `"${r.slug.replace(/"/g, '""')}"`, r.category, r.side,
+    [r.id, r.wallet, `"${r.slug.replace(/"/g, '""')}"`, r.category, r.source, r.side,
      r.entry.toFixed(4), r.cash.toFixed(2), r.status, r.dbPnl.toFixed(4),
      r.verifyPnl.toFixed(4), r.won === null ? "" : String(r.won), String(r.isStopLoss),
      r.openedAt.toISOString(), r.closedAt?.toISOString() ?? "", r.day].join(",")

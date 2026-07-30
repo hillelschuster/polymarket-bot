@@ -256,11 +256,12 @@ export async function runScanWallets(): Promise<void> {
       // win-rate, avg-PnL). No gate in this system may act on unrealized PnL.
       const global = result.global;
 
-      // Per-wallet copy track record. Demote on REALIZED results only: under
-      // hold-to-resolution, an open trade's truth is unknown until it resolves, so
-      // status decisions judge on resolved/closed outcomes — never unrealized marks.
+      // Per-wallet copy track record. Demote on RESOLVED WALLET-COPY results only:
+      // - status="resolved" (terminal outcome, not stop-loss "closed" or unrealized "open")
+      // - source="wallet_copy" (not strategy trades)
+      // Legacy stop exits and open marks are NOT wallet-skill evidence.
       const copyAgg = await prisma.paperTrade.aggregate({
-        where: { walletAddress: p.address, status: { in: ["resolved", "closed"] } },
+        where: { walletAddress: p.address, status: "resolved", source: "wallet_copy" },
         _count: true,
         _sum: { realizedPnl: true },
       });

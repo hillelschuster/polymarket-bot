@@ -248,23 +248,23 @@ describe("scoreTrade", () => {
 });
 
 describe("walletCopySkipReason (copy-performance filter)", () => {
-  const base = { side: "BUY", count: 0, avgPnl: 0, winRate: 0, totalPnl: 0, openCount: 0 };
+  const base = { segment: "other", count: 0, avgPnl: 0, winRate: 0, totalPnl: 0, openCount: 0 };
 
   it("copies a fresh, unproven wallet (exploration)", () => {
     expect(walletCopySkipReason({ ...base })).toBeNull();
   });
 
-  it("drops a (wallet, side) that loses on average once enough samples", () => {
-    const r = walletCopySkipReason({ ...base, side: "BUY", count: 5, avgPnl: -0.4, winRate: 0.5 });
+  it("drops a (wallet, segment) that loses on average once enough samples", () => {
+    const r = walletCopySkipReason({ ...base, segment: "sports_mainline", count: 5, avgPnl: -0.4, winRate: 0.5 });
     expect(r).toContain("avg PnL");
   });
 
-  it("keeps a (wallet, side) that wins on average", () => {
-    expect(walletCopySkipReason({ ...base, side: "SELL", count: 5, avgPnl: 0.3, winRate: 0.6 })).toBeNull();
+  it("keeps a (wallet, segment) that wins on average", () => {
+    expect(walletCopySkipReason({ ...base, segment: "tennis", count: 5, avgPnl: 0.3, winRate: 0.6 })).toBeNull();
   });
 
-  it("does NOT drop a losing side before minWalletCopyCount (let it prove itself)", () => {
-    expect(walletCopySkipReason({ ...base, side: "BUY", count: 2, avgPnl: -0.4 })).toBeNull();
+  it("does NOT drop a losing segment before minWalletCopyCount (let it prove itself)", () => {
+    expect(walletCopySkipReason({ ...base, segment: "sports_mainline", count: 2, avgPnl: -0.4 })).toBeNull();
   });
 
   it("catastrophic-loss stop: drops wallet entirely once total PnL < maxWalletLoss", () => {
@@ -277,8 +277,8 @@ describe("walletCopySkipReason (copy-performance filter)", () => {
     expect(r).toContain("diversification cap");
   });
 
-  it("catastrophic stop takes priority over per-side performance", () => {
-    const r = walletCopySkipReason({ ...base, totalPnl: -10, side: "SELL", count: 5, avgPnl: 0.3 });
+  it("catastrophic stop takes priority over per-segment performance", () => {
+    const r = walletCopySkipReason({ ...base, totalPnl: -10, segment: "tennis", count: 5, avgPnl: 0.3 });
     expect(r).toContain("catastrophic-loss stop");
   });
 });
