@@ -256,23 +256,13 @@ export async function runScanWallets(): Promise<void> {
       // win-rate, avg-PnL). No gate in this system may act on unrealized PnL.
       const global = result.global;
 
-      // Per-wallet copy track record. Demote on RESOLVED WALLET-COPY results only:
-      // - status="resolved" (terminal outcome, not stop-loss "closed" or unrealized "open")
-      // - source="wallet_copy" (not strategy trades)
-      // Legacy stop exits and open marks are NOT wallet-skill evidence.
-      const copyAgg = await prisma.paperTrade.aggregate({
-        where: { walletAddress: p.address, status: "resolved", source: "wallet_copy" },
-        _count: true,
-        _sum: { realizedPnl: true },
-      });
+      // Per-segment performance is handled downstream by walletCopySkipReason
+      // (win-rate + avg-PnL per segment after minWalletCopyCount samples).
+      // No global aggregate demotion: tennis losses must not suppress MLB-proven wallets.
       let status: "track" | "watch" | "ignore";
-      if (copyAgg._count >= 5 && (copyAgg._sum.realizedPnl ?? 0) < 0) {
-        status = "ignore";
-      } else {
-        status = global >= 20 ? "track"
-          : global >= 10 ? "watch"
-          : "ignore";
-      }
+      status = global >= 20 ? "track"
+        : global >= 10 ? "watch"
+        : "ignore";
 
       const bestCategory = Object.entries(cats).sort((a, b) => b[1] - a[1])[0]?.[0] ?? null;
 

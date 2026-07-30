@@ -80,7 +80,6 @@ export async function runScoreTrades(): Promise<void> {
     select: { walletAddress: true, side: true, unrealizedPnl: true, realizedPnl: true, status: true, marketId: true, tokenId: true, slug: true, source: true, simulatedPositionSize: true },
   });
   const copyPerf = new Map<string, { count: number; winRate: number; avgPnl: number; wins: number }>();
-  const walletTotalPnl = new Map<string, number>();
   const walletOpenCount = new Map<string, number>();
   // Persistent dedup set: marketId+tokenId pairs we already have copies for (ALL statuses)
   const existingCopies = new Set<string>();
@@ -108,7 +107,6 @@ export async function runScoreTrades(): Promise<void> {
     e.avgPnl += pnl;
     if (pnl > 0) e.wins++;
     copyPerf.set(k, e);
-    walletTotalPnl.set(c.walletAddress, (walletTotalPnl.get(c.walletAddress) ?? 0) + pnl);
   }
   for (const e of copyPerf.values()) {
     e.avgPnl /= e.count;
@@ -180,10 +178,9 @@ export async function runScoreTrades(): Promise<void> {
       continue;
     }
     const perf = copyPerf.get(`${ot.walletAddress}|${segment}`);
-    const totalPnl = walletTotalPnl.get(ot.walletAddress) ?? 0;
     const openCount = walletOpenCount.get(ot.walletAddress) ?? 0;
     const skipReason = walletCopySkipReason(
-      { segment, count: perf?.count ?? 0, avgPnl: perf?.avgPnl ?? 0, winRate: perf?.winRate ?? 0, totalPnl, openCount },
+      { segment, count: perf?.count ?? 0, avgPnl: perf?.avgPnl ?? 0, winRate: perf?.winRate ?? 0, openCount },
       rules,
     );
     if (skipReason) {

@@ -248,7 +248,7 @@ describe("scoreTrade", () => {
 });
 
 describe("walletCopySkipReason (copy-performance filter)", () => {
-  const base = { segment: "other", count: 0, avgPnl: 0, winRate: 0, totalPnl: 0, openCount: 0 };
+  const base = { segment: "other", count: 0, avgPnl: 0, winRate: 0, openCount: 0 };
 
   it("copies a fresh, unproven wallet (exploration)", () => {
     expect(walletCopySkipReason({ ...base })).toBeNull();
@@ -267,18 +267,16 @@ describe("walletCopySkipReason (copy-performance filter)", () => {
     expect(walletCopySkipReason({ ...base, segment: "sports_mainline", count: 2, avgPnl: -0.4 })).toBeNull();
   });
 
-  it("catastrophic-loss stop: drops wallet entirely once total PnL < maxWalletLoss", () => {
-    const r = walletCopySkipReason({ ...base, totalPnl: -5 });
-    expect(r).toContain("catastrophic-loss stop");
-  });
-
   it("diversification cap: skips when wallet hits maxCopiesPerWallet", () => {
     const r = walletCopySkipReason({ ...base, openCount: DEFAULT_RULES.maxCopiesPerWallet });
     expect(r).toContain("diversification cap");
   });
 
-  it("catastrophic stop takes priority over per-segment performance", () => {
-    const r = walletCopySkipReason({ ...base, totalPnl: -10, segment: "tennis", count: 5, avgPnl: 0.3 });
-    expect(r).toContain("catastrophic-loss stop");
+  it("no global gate: losing one segment does NOT block another segment", () => {
+    // Tennis segment is losing, but sports_mainline is winning — mainline must pass
+    const tennisRec = { ...base, segment: "tennis", count: 5, avgPnl: -0.8, winRate: 0.2 };
+    const mainlineRec = { ...base, segment: "sports_mainline", count: 5, avgPnl: 1.2, winRate: 0.8 };
+    expect(walletCopySkipReason(tennisRec)).not.toBeNull(); // tennis blocked
+    expect(walletCopySkipReason(mainlineRec)).toBeNull();    // mainline passes
   });
 });

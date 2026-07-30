@@ -157,7 +157,9 @@ export type MarketSegment = "sports_mainline" | "sports_derivative" | "tennis" |
 
 const TENNIS_PREFIXES = new Set(["wta", "atp", "itf", "challenger"]);
 const DERIVATIVE_KEYWORDS = ["spread", "total", "totals", "set", "prop", "over", "under", "handicap", "run-line", "puck-line", "point-spread"];
-const MAINLINE_PREFIXES = new Set(["mlb", "ufc", "f1", "nba", "nfl", "nhl", "boxing", "nascar", "golf", "epl", "ucl", "mls", "wnba", "ncaaf", "ncaab", "fifa", "fifwc", "mex"]);
+// Only MLB/UFC/F1 have proven edge (14/14 resolved, +42.9% ROI in replay).
+// All other sports stay at $5 exploratory until they produce their own evidence.
+const PROVEN_MAINLINE = new Set(["mlb", "ufc", "f1"]);
 
 /** Classify a market slug into a sizing/skill segment. */
 export function segmentFromSlug(slug?: string | null): MarketSegment {
@@ -166,11 +168,12 @@ export function segmentFromSlug(slug?: string | null): MarketSegment {
   const prefix = s.split("-")[0];
   // Tennis is its own segment (roughly market-efficient per audit)
   if (TENNIS_PREFIXES.has(prefix)) return "tennis";
-  // Sports derivatives: spreads, totals, props
+  // Sports derivatives: spreads, totals, props (any sport)
   const cat = CATEGORY_PREFIXES[prefix];
   if (cat === "sports") {
     if (DERIVATIVE_KEYWORDS.some((k) => s.includes(k))) return "sports_derivative";
-    return "sports_mainline";
+    // $20 mainline ONLY for proven sports (MLB/UFC/F1); others → $5 exploratory
+    if (PROVEN_MAINLINE.has(prefix)) return "sports_mainline";
   }
   return "other";
 }
@@ -423,22 +426,19 @@ export interface WalletCopyRecord {
   count: number;          // resolved wallet-copy trades in this segment
   avgPnl: number;         // average realized PnL per resolved trade
   winRate: number;        // fraction of resolved trades with pnl > 0
-  totalPnl: number;       // wallet's TOTAL resolved wallet-copy PnL (catastrophic-loss stop)
   openCount: number;      // wallet's open copy count (diversification cap)
 }
 
 /**
  * Pure decision for the copy-performance filter. Returns a skip reason if this
- * (wallet, side) should NOT be copied, else null. Kept pure so the job's learning
- * loop is unit-testable. Three guards:
- *  1. catastrophic-loss stop — a wallet that has lost too much total is dropped entirely;
- *  2. diversification cap — don't pile into one wallet (alternate across many);
- *  3. per-(wallet, side) performance — drop sides that lose on average (BUY loses,
- *     SELL wins, so a wallet's BUY copies get dropped while SELL keeps running).
+ * (wallet, segment) should NOT be copied, else null. Kept pure so the job's learning
+ * loop is unit-testable. Two guards:
+ *  1. diversification cap — don't pile into one wallet (alternate across many);
+ *  2. per-segment performance — drop segments that lose on average after enough samples.
+ * No global wallet-loss gate: per-segment filters already remove bad segments after
+ * minWalletCopyCount results, without cross-segment contamination.
  */
 export function walletCopySkipReason(rec: WalletCopyRecord, rules = DEFAULT_RULES): string | null {
-  if (rec.totalPnl < rules.maxWalletLoss)
-    return `wallet resolved PnL $${rec.totalPnl.toFixed(2)} < ${rules.maxWalletLoss} (catastrophic-loss stop)`;
   if (rec.openCount >= rules.maxCopiesPerWallet)
     return `wallet already has ${rec.openCount} open copies (diversification cap)`;
   if (rec.count >= rules.minWalletCopyCount && rec.winRate < rules.minWalletCopyWinRate)

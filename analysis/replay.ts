@@ -16,6 +16,7 @@ type MarketSegment = "sports_mainline" | "sports_derivative" | "tennis" | "other
 const TENNIS = new Set(["wta", "atp", "itf", "challenger"]);
 const DERIV_KW = ["spread", "total", "totals", "set", "prop", "over", "under", "handicap", "run-line", "puck-line", "point-spread"];
 const SPORTS_PREFIXES = new Set(["mlb", "nba", "nfl", "nhl", "epl", "ucl", "mex", "mls", "fifa", "fifwc", "wnba", "ncaaf", "ncaab", "tennis", "golf", "ufc", "boxing", "f1", "nascar", "wta", "atp", "itf", "challenger"]);
+const PROVEN_MAINLINE = new Set(["mlb", "ufc", "f1"]); // only proven $20 sports
 
 function segmentFromSlug(slug: string | null): MarketSegment {
   if (!slug) return "other";
@@ -24,7 +25,7 @@ function segmentFromSlug(slug: string | null): MarketSegment {
   if (TENNIS.has(prefix)) return "tennis";
   if (SPORTS_PREFIXES.has(prefix)) {
     if (DERIV_KW.some((k) => s.includes(k))) return "sports_derivative";
-    return "sports_mainline";
+    if (PROVEN_MAINLINE.has(prefix)) return "sports_mainline";
   }
   return "other";
 }
