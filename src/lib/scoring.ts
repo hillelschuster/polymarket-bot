@@ -189,6 +189,15 @@ export function segmentSize(segment: MarketSegment): number {
 }
 
 /**
+ * Whether the minWalletGlobal gate is bypassed for this segment.
+ * sports_mainline has proven edge independent of leaderboard heuristics;
+ * all other segments still require the global score floor.
+ */
+export function bypassesGlobalScoreGate(segment: MarketSegment): boolean {
+  return segment === "sports_mainline";
+}
+
+/**
  * Category-aware favorite gate thresholds. Research basis:
  * - Politics: Le (2026) 292M trades → 13-18% underconfidence → wider gate captures more edge
  * - Sports/Crypto: near-efficient at short horizons → tighter gate, only strong favorites

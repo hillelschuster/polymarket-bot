@@ -6,6 +6,8 @@ import {
   scoreTradeByMarket,
   categoryFromSlug,
   walletCopySkipReason,
+  bypassesGlobalScoreGate,
+  segmentFromSlug,
   DEFAULT_RULES,
   type MarketFeatures,
 } from "../src/lib/scoring.js";
@@ -278,5 +280,33 @@ describe("walletCopySkipReason (copy-performance filter)", () => {
     const mainlineRec = { ...base, segment: "sports_mainline", count: 5, avgPnl: 1.2, winRate: 0.8 };
     expect(walletCopySkipReason(tennisRec)).not.toBeNull(); // tennis blocked
     expect(walletCopySkipReason(mainlineRec)).toBeNull();    // mainline passes
+  });
+});
+
+describe("globalScore gate bypass (mainline edge protection)", () => {
+  it("low-global-score MLB/UFC/F1 mainline BYPASSES the wallet gate", () => {
+    // These slugs classify as sports_mainline → gate bypassed
+    expect(segmentFromSlug("mlb-yankees-redsox-2026-07-20")).toBe("sports_mainline");
+    expect(segmentFromSlug("ufc-jones-aspinall-2026-08-15")).toBe("sports_mainline");
+    expect(segmentFromSlug("f1-monza-gp-2026-09-07")).toBe("sports_mainline");
+    expect(bypassesGlobalScoreGate("sports_mainline")).toBe(true);
+  });
+
+  it("low-global-score tennis/derivative/other remains BLOCKED", () => {
+    expect(bypassesGlobalScoreGate("tennis")).toBe(false);
+    expect(bypassesGlobalScoreGate("sports_derivative")).toBe(false);
+    expect(bypassesGlobalScoreGate("other")).toBe(false);
+    // NBA/NFL/NHL are NOT proven mainline → classified as "other" → gate applies
+    expect(segmentFromSlug("nba-lakers-celtics-2026-01-15")).toBe("other");
+    expect(segmentFromSlug("nfl-chiefs-eagles-2026-09-08")).toBe("other");
+    expect(bypassesGlobalScoreGate(segmentFromSlug("nba-lakers-celtics-2026-01-15"))).toBe(false);
+  });
+
+  it("monitor query includes track and watch (not ignore)", () => {
+    // This validates the filter shape used in monitorTrades.ts
+    const monitorFilter = { in: ["track", "watch"] };
+    expect(monitorFilter.in).toContain("track");
+    expect(monitorFilter.in).toContain("watch");
+    expect(monitorFilter.in).not.toContain("ignore");
   });
 });

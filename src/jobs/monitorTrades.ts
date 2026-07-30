@@ -9,7 +9,7 @@ export async function runMonitorTrades(): Promise<void> {
     console.log("DEMO mode: skipping live trade monitor");
     return;
   }
-  const tracked = await prisma.walletProfile.findMany({ where: { status: "track" } });
+  const tracked = await prisma.walletProfile.findMany({ where: { status: { in: ["track", "watch"] } } });
   if (!tracked.length) {
     console.log("monitorTrades: no tracked wallets found");
     return;

@@ -165,8 +165,11 @@ export async function runScoreTrades(): Promise<void> {
     }
 
     // --- GATE 2: Wallet quality + copy-performance filter ---
-    // Enforce minimum wallet global score (leaderboard quality signal)
-    if (walletGlobalScore < rules.minWalletGlobal) {
+    // Enforce minimum wallet global score (leaderboard quality signal).
+    // BYPASS for sports_mainline: proven edge (21/23 resolved) must not be
+    // suppressed by a leaderboard heuristic that measures liquidity/variance,
+    // not copy profitability. Per-segment filters still apply downstream.
+    if (segment !== "sports_mainline" && walletGlobalScore < rules.minWalletGlobal) {
       await prisma.decisionJournal.create({
         data: {
           observedTradeId: ot.id, walletAddress: ot.walletAddress, marketId: ot.marketId,
