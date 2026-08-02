@@ -10,7 +10,7 @@
 // The slow cycle runs on startup too (to populate wallet scores), then every N fast passes.
 //
 // Env overrides:
-//   FAST_INTERVAL_MS  (default 420000 = 7 min)
+//   FAST_INTERVAL_MS  (default 420000 = 7 min, start-to-start target)
 //   SLOW_EVERY_N_PASSES (default 4 = every 4th fast pass ≈ 28 min)
 //   LOOP_MAX_PASSES (default Infinity)
 
@@ -22,6 +22,8 @@ process.on("uncaughtException", (e) => console.error("uncaughtException:", (e as
 process.on("unhandledRejection", (e) => console.error("unhandledRejection:", (e as Error)?.message ?? String(e)));
 
 const FAST_INTERVAL_MS = Number(process.env.FAST_INTERVAL_MS ?? 7 * 60 * 1000);
+// Floor so a pass that overruns the target still gets a short breather before the next.
+const MIN_SLEEP_MS = 60_000;
 const SLOW_EVERY_N_PASSES = Number(process.env.SLOW_EVERY_N_PASSES ?? 4);
 const MAX_PASSES = process.env.LOOP_MAX_PASSES ? Number(process.env.LOOP_MAX_PASSES) : Infinity;
 
@@ -58,9 +60,13 @@ async function main() {
       }
     }
 
-    const elapsed = (Date.now() - start) / 1000;
-    console.log(`pass ${pass} took ${elapsed.toFixed(0)}s; sleeping ${(FAST_INTERVAL_MS / 1000).toFixed(0)}s`);
-    await new Promise((r) => setTimeout(r, FAST_INTERVAL_MS));
+    // Start-to-start cadence: sleep only the remainder of the target interval.
+    // Previously the full interval was slept AFTER every pass (pass + 7 min),
+    // which pushed the effective cycle past the 20-min sports signal window.
+    const elapsedMs = Date.now() - start;
+    const sleepMs = Math.max(MIN_SLEEP_MS, FAST_INTERVAL_MS - elapsedMs);
+    console.log(`pass ${pass} took ${(elapsedMs / 1000).toFixed(0)}s; sleeping ${(sleepMs / 1000).toFixed(0)}s`);
+    await new Promise((r) => setTimeout(r, sleepMs));
   }
   console.log("loop finished");
 }
