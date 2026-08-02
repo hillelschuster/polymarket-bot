@@ -28,8 +28,13 @@ export default async function ReportsPage() {
           Latest Report — {latest.date.toLocaleDateString()}
         </h2>
         <div className="grid grid-cols-2 gap-4 md:grid-cols-4">
-          <ReportCard label="Paper PnL" value={latest.paperPnl != null ? `$${latest.paperPnl.toFixed(2)}` : null} />
-          <ReportCard label="Win Rate" value={latest.winRate != null ? `${(latest.winRate * 100).toFixed(1)}%` : null} />
+          <ReportCard label="Resolved Wallet-Copy PnL" value={latest.resolvedWalletCopyPnl != null ? `$${latest.resolvedWalletCopyPnl.toFixed(2)}` : null} />
+          <ReportCard label="Wallet-Copy Win Rate" value={latest.resolvedWalletCopyWinRate != null ? `${(latest.resolvedWalletCopyWinRate * 100).toFixed(1)}%` : null} />
+          <ReportCard label="Resolved Strategy PnL" value={latest.resolvedStrategyPnl != null ? `$${latest.resolvedStrategyPnl.toFixed(2)}` : null} />
+          <ReportCard label="Legacy Closed Stop-Loss" value={latest.legacyClosedStopLossPnl != null ? `$${latest.legacyClosedStopLossPnl.toFixed(2)}` : null} />
+          <ReportCard label="Open Wallet-Copy Unrealized" value={latest.openWalletCopyUnrealizedPnl != null ? `$${latest.openWalletCopyUnrealizedPnl.toFixed(2)}` : null} />
+          <ReportCard label="Open Strategy Unrealized" value={latest.openStrategyUnrealizedPnl != null ? `$${latest.openStrategyUnrealizedPnl.toFixed(2)}` : null} />
+          <ReportCard label="Combined Accounting (incl. legacy)" value={latest.combinedAccountingTotal != null ? `$${latest.combinedAccountingTotal.toFixed(2)}` : null} />
           <ReportCard label="Open Positions" value={latest.openPositions} />
           <ReportCard label="New Signals" value={latest.newSignals} />
           <ReportCard label="Copied" value={latest.copiedSignals} />
@@ -60,8 +65,8 @@ export default async function ReportsPage() {
             <thead>
               <tr className="border-b border-zinc-700 text-zinc-400">
                 <th className="pb-2 pr-3">Date</th>
-                <th className="pb-2 pr-3">PnL</th>
-                <th className="pb-2 pr-3">Win Rate</th>
+                <th className="pb-2 pr-3">Wallet PnL</th>
+                <th className="pb-2 pr-3">Wallet WR</th>
                 <th className="pb-2 pr-3">Open</th>
                 <th className="pb-2 pr-3">Signals</th>
                 <th className="pb-2">Sent</th>
@@ -71,10 +76,10 @@ export default async function ReportsPage() {
               {reports.map((r) => (
                 <tr key={r.id} className="border-b border-zinc-800">
                   <td className="py-2 pr-3">{r.date.toLocaleDateString()}</td>
-                  <td className={`py-2 pr-3 font-medium ${(r.paperPnl ?? 0) >= 0 ? "text-emerald-400" : "text-red-400"}`}>
-                    {r.paperPnl != null ? `$${r.paperPnl.toFixed(2)}` : "—"}
+                  <td className={`py-2 pr-3 font-medium ${(r.resolvedWalletCopyPnl ?? r.paperPnl ?? 0) >= 0 ? "text-emerald-400" : "text-red-400"}`}>
+                    {(r.resolvedWalletCopyPnl ?? r.paperPnl) != null ? `$${(r.resolvedWalletCopyPnl ?? r.paperPnl)!.toFixed(2)}` : "—"}
                   </td>
-                  <td className="py-2 pr-3">{r.winRate != null ? `${(r.winRate * 100).toFixed(1)}%` : "—"}</td>
+                  <td className="py-2 pr-3">{(r.resolvedWalletCopyWinRate ?? r.winRate) != null ? `${((r.resolvedWalletCopyWinRate ?? r.winRate)! * 100).toFixed(1)}%` : "—"}</td>
                   <td className="py-2 pr-3">{r.openPositions ?? "—"}</td>
                   <td className="py-2 pr-3">{r.newSignals ?? "—"}</td>
                   <td className="py-2">{r.sentToTelegram ? "✓" : "—"}</td>

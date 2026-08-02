@@ -19,6 +19,7 @@ import { runReviewOutcomes } from "./reviewOutcomes.js";
 import { runUpdateRules } from "./updateRules.js";
 import { runReportDaily } from "./reportDaily.js";
 import { prisma } from "../lib/db.js";
+import { summarizePnl } from "../lib/reporting.js";
 
 interface StepResult {
   name: string;
@@ -80,14 +81,20 @@ export async function runFastPath(): Promise<PipelineResult> {
 
 /** One-line profitability snapshot so every fast pass shows current performance. */
 async function logPnlSnapshot(): Promise<void> {
-  const [open, closed] = await Promise.all([
-    prisma.paperTrade.aggregate({ where: { status: "open" }, _sum: { unrealizedPnl: true }, _count: true }),
-    prisma.paperTrade.aggregate({ where: { status: { in: ["resolved", "closed"] } }, _sum: { realizedPnl: true } }),
-  ]);
-  const realized = closed._sum.realizedPnl ?? 0;
-  const unrealized = open._sum.unrealizedPnl ?? 0;
+  const trades = await prisma.paperTrade.findMany({
+    select: { source: true, status: true, realizedPnl: true, unrealizedPnl: true },
+  });
+  const pnl = summarizePnl(trades);
+  const openPositions = trades.filter((trade) => trade.status === "open").length;
   console.log(
-    `PnL: net realized $${realized.toFixed(2)} | unrealized $${unrealized.toFixed(2)} (${open._count} open) | true total $${(realized + unrealized).toFixed(2)}`,
+    `PnL: resolved wallet-copy $${pnl.resolvedWalletCopyPnl.toFixed(2)} `
+      + `(${pnl.resolvedWalletCopyWins}/${pnl.resolvedWalletCopyCount} WR ${(pnl.resolvedWalletCopyWinRate * 100).toFixed(1)}%) `
+      + `| resolved strategy $${pnl.resolvedStrategyPnl.toFixed(2)} `
+      + `| legacy closed stop-loss $${pnl.legacyClosedStopLossPnl.toFixed(2)} `
+      + `| open wallet-copy unrealized $${pnl.openWalletCopyUnrealizedPnl.toFixed(2)} `
+      + `| open strategy unrealized $${pnl.openStrategyUnrealizedPnl.toFixed(2)} `
+      + `| combined accounting total (includes legacy losses) $${pnl.combinedAccountingTotal.toFixed(2)} `
+      + `(${openPositions} open)`,
   );
 }
 

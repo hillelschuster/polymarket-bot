@@ -4,11 +4,12 @@
 // Gamma midpoints are NEVER used as entry. If the orderbook is unavailable,
 // the trade is skipped. This makes every future observation trustworthy.
 import { prisma } from "../lib/db.js";
-import { scoreTradeByMarket, DEFAULT_RULES, walletCopySkipReason, categoryFromSlug, segmentFromSlug, segmentSize, getFavoriteGate, type RuleSetValues, type MarketSegment } from "../lib/scoring.js";
+import { scoreTradeByMarket, DEFAULT_RULES, walletCopySkipReason, categoryFromSlug, segmentFromSlug, segmentSize, getFavoriteGate, mainlinePositionSize, priorWalletCopyPerformance, type RuleSetValues, type MarketSegment } from "../lib/scoring.js";
 import { createPaperTrade } from "../lib/paper.js";
 import { getMarketBySlug, getExecutableBuyQuote } from "../adapters/polymarket.js";
 import { realTradingEnabled } from "../lib/config.js";
 import { executeWalletCopyOrder } from "../lib/liveExecution.js";
+import { createDecisionJournal, LOGIC_VERSION, type DecisionJournalInput } from "../lib/decisionJournal.js";
 
 // --- Constants ---
 const MAX_SIGNAL_AGE_MS = 10 * 60 * 1000; // 10 minutes — default for non-sports
@@ -16,7 +17,14 @@ const SPORTS_SIGNAL_AGE_MS = 20 * 60 * 1000; // 20 minutes — sports games last
 const SPORTS_MIN_HOURS_TO_RESOLUTION = 0.5; // 30 min — reject if game almost over
 const SPORTS_MAX_DAYS_TO_RESOLUTION = 2; // reject sports >2 days out (not in-game)
 const MAX_SPREAD_HARD_GATE = 0.05; // 5% — hard reject wide spreads
-const LOGIC_VERSION = "v4-wallet-copy";
+export const SCORING_LOOKBACK_MS = 24 * 60 * 60 * 1000;
+
+export function unscoredObservedTradeWhere(now = new Date()) {
+  return {
+    decision: null,
+    timestamp: { gte: new Date(now.getTime() - SCORING_LOOKBACK_MS) },
+  };
+}
 
 /**
  * Parse resolution time from sports slugs like "mlb-wsh-col-2026-07-21".
@@ -45,7 +53,7 @@ export async function runScoreTrades(): Promise<void> {
 
   // Newest-first: process recent signals before stale ones
   const unscored = await prisma.observedTrade.findMany({
-    where: { decision: null },
+    where: unscoredObservedTradeWhere(),
     include: { wallet: true },
     orderBy: { timestamp: "desc" },
     take: 100,
@@ -77,9 +85,8 @@ export async function runScoreTrades(): Promise<void> {
   // Legacy stop-loss ("closed") and strategy trades are EXCLUDED from skill.
   // Keyed by wallet|segment (not wallet|side) so tennis losses don't poison MLB skill.
   const allCopies = await prisma.paperTrade.findMany({
-    select: { walletAddress: true, side: true, unrealizedPnl: true, realizedPnl: true, status: true, marketId: true, tokenId: true, slug: true, source: true, simulatedPositionSize: true },
+    select: { walletAddress: true, side: true, unrealizedPnl: true, realizedPnl: true, status: true, marketId: true, tokenId: true, slug: true, source: true, simulatedPositionSize: true, openedAt: true, resolvedAt: true },
   });
-  const copyPerf = new Map<string, { count: number; winRate: number; avgPnl: number; wins: number }>();
   const walletOpenCount = new Map<string, number>();
   // Persistent dedup set: marketId+tokenId pairs we already have copies for (ALL statuses)
   const existingCopies = new Set<string>();
@@ -97,20 +104,6 @@ export async function runScoreTrades(): Promise<void> {
       walletOpenCount.set(c.walletAddress, (walletOpenCount.get(c.walletAddress) ?? 0) + 1);
       if (c.slug) eventExposure.set(c.slug, (eventExposure.get(c.slug) ?? 0) + (c.simulatedPositionSize ?? 0));
     }
-    // SKILL METRICS: only resolved wallet-copy trades
-    if (c.source !== "wallet_copy" || c.status !== "resolved") continue;
-    const pnl = c.realizedPnl ?? 0;
-    const segment = segmentFromSlug(c.slug);
-    const k = `${c.walletAddress}|${segment}`;
-    const e = copyPerf.get(k) ?? { count: 0, winRate: 0, avgPnl: 0, wins: 0 };
-    e.count++;
-    e.avgPnl += pnl;
-    if (pnl > 0) e.wins++;
-    copyPerf.set(k, e);
-  }
-  for (const e of copyPerf.values()) {
-    e.avgPnl /= e.count;
-    e.winRate = e.wins / e.count;
   }
 
   const priceOf = (slug: string | null, tokenId: string | null): number | null => {
@@ -130,36 +123,56 @@ export async function runScoreTrades(): Promise<void> {
 
   for (const ot of unscored) {
     try {
-    const walletGlobalScore = ot.wallet?.globalScore ?? 50;
-    // --- GATE 0: Only BUY is supported (we buy outcome tokens; SELL is fictional) ---
-    const side = (ot.side ?? "BUY").toUpperCase();
-    if (side !== "BUY") {
-      await prisma.decisionJournal.create({
-        data: {
-          observedTradeId: ot.id, walletAddress: ot.walletAddress, marketId: ot.marketId,
-          decision: "skip", copyScore: 0,
-          reasonsJson: JSON.stringify([`SELL not supported (only BUY tokens; SELL is fictional)`, LOGIC_VERSION]),
-          walletQualityScore: walletGlobalScore,
-        },
-      });
-      continue;
-    }
+    const walletQualityScore = ot.wallet?.globalScore ?? null;
+    const walletGlobalScore = walletQualityScore ?? 50;
     const category = ot.marketCategory ?? categoryFromSlug(ot.slug) ?? null;
     const isSports = category === "sports";
     const segment: MarketSegment = segmentFromSlug(ot.slug);
+    const perf = priorWalletCopyPerformance(allCopies, ot.walletAddress, segment, ot.timestamp);
+    const openCount = walletOpenCount.get(ot.walletAddress) ?? 0;
+    const baseSize = segment === "sports_mainline"
+      ? mainlinePositionSize(walletQualityScore, rules.minWalletGlobal, perf)
+      : segmentSize(segment);
+    const slugKey = ot.slug ?? ot.marketId;
+    const alreadyDeployed = eventExposure.get(slugKey) ?? 0;
+    const MAX_PER_EVENT = 20;
+    const remainingEventBudget = Math.max(0, MAX_PER_EVENT - alreadyDeployed);
+    const intendedPositionSize = Math.min(baseSize, remainingEventBudget);
+    const signalAge = ot.timestamp ? Date.now() - ot.timestamp.getTime() : Infinity;
+    const journalContext: Omit<DecisionJournalInput, "decision" | "firstFailingGate"> = {
+      observedTradeId: ot.id,
+      walletAddress: ot.walletAddress,
+      marketId: ot.marketId,
+      walletStatus: ot.wallet?.status ?? null,
+      walletQualityScore,
+      sourceRank: ot.wallet?.sourceRank ?? null,
+      marketSegment: segment,
+      priorSameSegmentResolvedCount: perf.count,
+      priorSameSegmentWins: perf.wins,
+      priorSameSegmentAveragePnl: perf.avgPnl,
+      signalAgeSeconds: ot.timestamp ? Math.max(0, signalAge) / 1000 : null,
+      intendedPositionSize,
+      eventExposureBefore: alreadyDeployed,
+      ruleSetId: activeRs?.id ?? null,
+      ruleSetVersion: activeRs?.version ?? null,
+    };
+    const journal = (
+      decision: DecisionJournalInput["decision"],
+      firstFailingGate: string,
+      details: Partial<DecisionJournalInput> = {},
+    ) => createDecisionJournal({ ...journalContext, ...details, decision, firstFailingGate });
+
+    // --- GATE 0: Only BUY is supported (we buy outcome tokens; SELL is fictional) ---
+    const side = (ot.side ?? "BUY").toUpperCase();
+    if (side !== "BUY") {
+      await journal("skip", "side", { copyScore: 0, reasons: ["SELL not supported (only BUY tokens; SELL is fictional)", LOGIC_VERSION] });
+      continue;
+    }
 
     // --- GATE 1: Signal age (sports get 20 min; everything else 10 min) ---
     const maxAge = isSports ? SPORTS_SIGNAL_AGE_MS : MAX_SIGNAL_AGE_MS;
-    const signalAge = ot.timestamp ? Date.now() - ot.timestamp.getTime() : Infinity;
     if (signalAge > maxAge) {
-      await prisma.decisionJournal.create({
-        data: {
-          observedTradeId: ot.id, walletAddress: ot.walletAddress, marketId: ot.marketId,
-          decision: "skip", copyScore: 0,
-          reasonsJson: JSON.stringify([`signal age ${(signalAge / 60000).toFixed(0)}min > ${(maxAge / 60000).toFixed(0)}min`, LOGIC_VERSION]),
-          walletQualityScore: walletGlobalScore,
-        },
-      });
+      await journal("skip", "signal_age", { copyScore: 0, reasons: [`signal age ${(signalAge / 60000).toFixed(0)}min > ${(maxAge / 60000).toFixed(0)}min`, LOGIC_VERSION] });
       rejectedStale++;
       continue;
     }
@@ -170,45 +183,22 @@ export async function runScoreTrades(): Promise<void> {
     // suppressed by a leaderboard heuristic that measures liquidity/variance,
     // not copy profitability. Per-segment filters still apply downstream.
     if (segment !== "sports_mainline" && walletGlobalScore < rules.minWalletGlobal) {
-      await prisma.decisionJournal.create({
-        data: {
-          observedTradeId: ot.id, walletAddress: ot.walletAddress, marketId: ot.marketId,
-          decision: "skip", copyScore: 0,
-          reasonsJson: JSON.stringify([`wallet globalScore ${walletGlobalScore} < min ${rules.minWalletGlobal}`, LOGIC_VERSION]),
-          walletQualityScore: walletGlobalScore,
-        },
-      });
+      await journal("skip", "wallet_quality", { copyScore: 0, reasons: [`wallet globalScore ${walletGlobalScore} < min ${rules.minWalletGlobal}`, LOGIC_VERSION] });
       continue;
     }
-    const perf = copyPerf.get(`${ot.walletAddress}|${segment}`);
-    const openCount = walletOpenCount.get(ot.walletAddress) ?? 0;
     const skipReason = walletCopySkipReason(
-      { segment, count: perf?.count ?? 0, avgPnl: perf?.avgPnl ?? 0, winRate: perf?.winRate ?? 0, openCount },
+      { segment, count: perf.count, avgPnl: perf.avgPnl, winRate: perf.winRate, openCount },
       rules,
     );
     if (skipReason) {
-      await prisma.decisionJournal.create({
-        data: {
-          observedTradeId: ot.id, walletAddress: ot.walletAddress, marketId: ot.marketId,
-          decision: "skip", copyScore: 0,
-          reasonsJson: JSON.stringify([skipReason, LOGIC_VERSION]),
-          walletQualityScore: walletGlobalScore,
-        },
-      });
+      await journal("skip", "wallet_copy_performance", { copyScore: 0, reasons: [skipReason, LOGIC_VERSION] });
       continue;
     }
 
     // --- GATE 3: Persistent dedup (DB-level: same marketId+tokenId) ---
     const dedupKey = `${ot.marketId}|${ot.tokenId}`;
     if (existingCopies.has(dedupKey)) {
-      await prisma.decisionJournal.create({
-        data: {
-          observedTradeId: ot.id, walletAddress: ot.walletAddress, marketId: ot.marketId,
-          decision: "skip", copyScore: 0,
-          reasonsJson: JSON.stringify(["already have open copy for this market+token (persistent dedup)", LOGIC_VERSION]),
-          walletQualityScore: walletGlobalScore,
-        },
-      });
+      await journal("skip", "dedup", { copyScore: 0, reasons: ["already have open copy for this market+token (persistent dedup)", LOGIC_VERSION] });
       rejectedDedup++;
       continue;
     }
@@ -230,26 +220,12 @@ export async function runScoreTrades(): Promise<void> {
         : hoursToResolutionFromSlug(ot.slug);
       if (hours == null) {
         // Unknown sports timing = REJECT (don't invent 30 days)
-        await prisma.decisionJournal.create({
-          data: {
-            observedTradeId: ot.id, walletAddress: ot.walletAddress, marketId: ot.marketId,
-            decision: "skip", copyScore: 0,
-            reasonsJson: JSON.stringify(["sports: unknown resolution time (no endDate, no slug date)", LOGIC_VERSION]),
-            walletQualityScore: walletGlobalScore,
-          },
-        });
+        await journal("skip", "sports_timing", { copyScore: 0, reasons: ["sports: unknown resolution time (no endDate, no slug date)", LOGIC_VERSION] });
         rejectedGates++;
         continue;
       }
       if (hours < SPORTS_MIN_HOURS_TO_RESOLUTION) {
-        await prisma.decisionJournal.create({
-          data: {
-            observedTradeId: ot.id, walletAddress: ot.walletAddress, marketId: ot.marketId,
-            decision: "skip", copyScore: 0,
-            reasonsJson: JSON.stringify([`sports: resolves in ${hours.toFixed(1)}h < ${SPORTS_MIN_HOURS_TO_RESOLUTION}h (game ending)`, LOGIC_VERSION]),
-            walletQualityScore: walletGlobalScore,
-          },
-        });
+        await journal("skip", "sports_timing", { copyScore: 0, reasons: [`sports: resolves in ${hours.toFixed(1)}h < ${SPORTS_MIN_HOURS_TO_RESOLUTION}h (game ending)`, LOGIC_VERSION] });
         rejectedGates++;
         continue;
       }
@@ -267,14 +243,7 @@ export async function runScoreTrades(): Promise<void> {
 
     // Hard spread gate
     if (spread > MAX_SPREAD_HARD_GATE) {
-      await prisma.decisionJournal.create({
-        data: {
-          observedTradeId: ot.id, walletAddress: ot.walletAddress, marketId: ot.marketId,
-          decision: "skip", copyScore: 0,
-          reasonsJson: JSON.stringify([`spread ${(spread * 100).toFixed(1)}% > ${MAX_SPREAD_HARD_GATE * 100}% hard gate`, LOGIC_VERSION]),
-          walletQualityScore: walletGlobalScore,
-        },
-      });
+      await journal("skip", "market_spread", { copyScore: 0, reasons: [`spread ${(spread * 100).toFixed(1)}% > ${MAX_SPREAD_HARD_GATE * 100}% hard gate`, LOGIC_VERSION] });
       rejectedGates++;
       continue;
     }
@@ -291,14 +260,7 @@ export async function runScoreTrades(): Promise<void> {
       detectedPrice,
     }, rules);
     if (mkt.skip) {
-      await prisma.decisionJournal.create({
-        data: {
-          observedTradeId: ot.id, walletAddress: ot.walletAddress, marketId: ot.marketId,
-          decision: "skip", copyScore: 0,
-          reasonsJson: JSON.stringify([...mkt.reasons, LOGIC_VERSION]),
-          walletQualityScore: walletGlobalScore,
-        },
-      });
+      await journal("skip", "market_score", { copyScore: 0, reasons: [...mkt.reasons, LOGIC_VERSION] });
       rejectedGates++;
       continue;
     }
@@ -307,52 +269,26 @@ export async function runScoreTrades(): Promise<void> {
     const favoritePrice = side === "BUY" ? midpoint : 1 - midpoint;
     const gate = getFavoriteGate(category);
     if (favoritePrice < gate) {
-      await prisma.decisionJournal.create({
-        data: {
-          observedTradeId: ot.id, walletAddress: ot.walletAddress, marketId: ot.marketId,
-          decision: "skip", copyScore: 0,
-          reasonsJson: JSON.stringify([`favoritePrice ${favoritePrice.toFixed(3)} < gate ${gate}`, ...mkt.reasons, LOGIC_VERSION]),
-          walletQualityScore: walletGlobalScore,
-        },
-      });
+      await journal("skip", "favorite_price", { copyScore: 0, reasons: [`favoritePrice ${favoritePrice.toFixed(3)} < gate ${gate}`, ...mkt.reasons, LOGIC_VERSION] });
       rejectedGates++;
       continue;
     }
 
     // --- GATE 5: Segment-aware sizing + per-event exposure cap ---
-    const baseSize = segmentSize(segment);
-    const slugKey = ot.slug ?? ot.marketId;
-    const alreadyDeployed = eventExposure.get(slugKey) ?? 0;
-    const MAX_PER_EVENT = 20;
-    const remainingEventBudget = Math.max(0, MAX_PER_EVENT - alreadyDeployed);
-    const cashBudget = Math.min(baseSize, remainingEventBudget);
+    const cashBudget = intendedPositionSize;
     if (cashBudget < 1) {
-      await prisma.decisionJournal.create({
-        data: {
-          observedTradeId: ot.id, walletAddress: ot.walletAddress, marketId: ot.marketId,
-          decision: "skip", copyScore: 0,
-          reasonsJson: JSON.stringify([`event exposure cap: $${alreadyDeployed.toFixed(0)} already deployed on ${slugKey.slice(0, 30)} (max $${MAX_PER_EVENT})`, LOGIC_VERSION]),
-          walletQualityScore: walletGlobalScore,
-        },
-      });
+      await journal("skip", "event_exposure", { copyScore: 0, reasons: [`event exposure cap: $${alreadyDeployed.toFixed(0)} already deployed on ${slugKey.slice(0, 30)} (max $${MAX_PER_EVENT})`, LOGIC_VERSION] });
       continue;
     }
     // Confidence for paper.ts (used only if explicitSize is not passed; kept for journal metadata)
     let confidence = mkt.score / 100;
-    if (perf && perf.count >= rules.minWalletCopyCount && perf.avgPnl > 0) {
+    if (perf.count >= rules.minWalletCopyCount && perf.avgPnl > 0) {
       confidence = Math.min(1, 0.6 + perf.avgPnl * 3);
     }
 
     // --- GATE 6: CLOB executable quote (FAIL-CLOSED: no quote = no trade) ---
     if (!ot.tokenId) {
-      await prisma.decisionJournal.create({
-        data: {
-          observedTradeId: ot.id, walletAddress: ot.walletAddress, marketId: ot.marketId,
-          decision: "skip", copyScore: 0,
-          reasonsJson: JSON.stringify(["no tokenId — cannot fetch CLOB quote (fail-closed)", LOGIC_VERSION]),
-          walletQualityScore: walletGlobalScore,
-        },
-      });
+      await journal("skip", "token_id", { copyScore: 0, reasons: ["no tokenId — cannot fetch CLOB quote (fail-closed)", LOGIC_VERSION] });
       rejectedNoQuote++;
       continue;
     }
@@ -365,14 +301,7 @@ export async function runScoreTrades(): Promise<void> {
     }
     if (!quote) {
       // FAIL-CLOSED: no midpoint fallback
-      await prisma.decisionJournal.create({
-        data: {
-          observedTradeId: ot.id, walletAddress: ot.walletAddress, marketId: ot.marketId,
-          decision: "skip", copyScore: 0,
-          reasonsJson: JSON.stringify([`CLOB quote failed for $${cashBudget} budget (fail-closed, no midpoint fallback)`, LOGIC_VERSION]),
-          walletQualityScore: walletGlobalScore,
-        },
-      });
+      await journal("skip", "executable_quote", { copyScore: 0, reasons: [`CLOB quote failed for $${cashBudget} budget (fail-closed, no midpoint fallback)`, LOGIC_VERSION] });
       rejectedNoQuote++;
       continue;
     }
@@ -380,40 +309,19 @@ export async function runScoreTrades(): Promise<void> {
     // --- GATE 7: Validate executable quote against gates ---
     // Upper-price cap: reject if all-in entry exceeds top threshold
     if (quote.allInPrice > rules.topThreshold) {
-      await prisma.decisionJournal.create({
-        data: {
-          observedTradeId: ot.id, walletAddress: ot.walletAddress, marketId: ot.marketId,
-          decision: "skip", copyScore: 0,
-          reasonsJson: JSON.stringify([`executable allIn ${quote.allInPrice.toFixed(4)} > top ${rules.topThreshold}`, LOGIC_VERSION]),
-          walletQualityScore: walletGlobalScore,
-        },
-      });
+      await journal("skip", "executable_top", { copyScore: 0, reasons: [`executable allIn ${quote.allInPrice.toFixed(4)} > top ${rules.topThreshold}`, LOGIC_VERSION], executableAsk: quote.bestAsk, allInPrice: quote.allInPrice, fee: quote.fee, spread: quote.spread, shares: quote.shares });
       rejectedGates++;
       continue;
     }
     // Hard spread gate on CLOB quote (not stale Gamma spread)
     if (quote.spread != null && quote.spread > MAX_SPREAD_HARD_GATE) {
-      await prisma.decisionJournal.create({
-        data: {
-          observedTradeId: ot.id, walletAddress: ot.walletAddress, marketId: ot.marketId,
-          decision: "skip", copyScore: 0,
-          reasonsJson: JSON.stringify([`CLOB spread ${(quote.spread * 100).toFixed(1)}% > ${MAX_SPREAD_HARD_GATE * 100}% hard gate`, LOGIC_VERSION]),
-          walletQualityScore: walletGlobalScore,
-        },
-      });
+      await journal("skip", "executable_spread", { copyScore: 0, reasons: [`CLOB spread ${(quote.spread * 100).toFixed(1)}% > ${MAX_SPREAD_HARD_GATE * 100}% hard gate`, LOGIC_VERSION], executableAsk: quote.bestAsk, allInPrice: quote.allInPrice, fee: quote.fee, spread: quote.spread, shares: quote.shares });
       rejectedGates++;
       continue;
     }
     // Favorite gate on the EXECUTABLE price (not midpoint)
     if (quote.allInPrice < gate) {
-      await prisma.decisionJournal.create({
-        data: {
-          observedTradeId: ot.id, walletAddress: ot.walletAddress, marketId: ot.marketId,
-          decision: "skip", copyScore: 0,
-          reasonsJson: JSON.stringify([`executable allIn ${quote.allInPrice.toFixed(4)} < favorite gate ${gate}`, LOGIC_VERSION]),
-          walletQualityScore: walletGlobalScore,
-        },
-      });
+      await journal("skip", "executable_favorite_price", { copyScore: 0, reasons: [`executable allIn ${quote.allInPrice.toFixed(4)} < favorite gate ${gate}`, LOGIC_VERSION], executableAsk: quote.bestAsk, allInPrice: quote.allInPrice, fee: quote.fee, spread: quote.spread, shares: quote.shares });
       rejectedGates++;
       continue;
     }
@@ -426,27 +334,27 @@ export async function runScoreTrades(): Promise<void> {
       cashBudget, // explicit segment-aware size
     );
 
-    const dj = await prisma.decisionJournal.create({
-      data: {
-        observedTradeId: ot.id,
-        walletAddress: ot.walletAddress,
-        marketId: ot.marketId,
-        decision: "paper_copy",
-        copyScore: mkt.score,
-        reasonsJson: JSON.stringify([
-          ...mkt.reasons,
-          `logic=${LOGIC_VERSION}`,
-          `signalDelay=${signalDelaySec?.toFixed(0)}s`,
-          `midpoint=${midpoint.toFixed(4)}`,
-          `bestAsk=${quote.bestAsk?.toFixed(4)}`,
-          `allInPrice=${quote.allInPrice.toFixed(4)}`,
-          `fee=${quote.fee.toFixed(4)}`,
-          `spread=${(quote.spread ?? 0).toFixed(4)}`,
-          `cashBudget=$${cashBudget}`,
-          `shares=${quote.shares.toFixed(2)}`,
-        ]),
-        walletQualityScore: walletGlobalScore,
-      },
+    const dj = await journal("paper_copy", "accepted", {
+      copyScore: mkt.score,
+      reasons: [
+        ...mkt.reasons,
+        `logic=${LOGIC_VERSION}`,
+        `signalDelay=${signalDelaySec?.toFixed(0)}s`,
+        `midpoint=${midpoint.toFixed(4)}`,
+        `bestAsk=${quote.bestAsk?.toFixed(4)}`,
+        `allInPrice=${quote.allInPrice.toFixed(4)}`,
+        `fee=${quote.fee.toFixed(4)}`,
+        `spread=${(quote.spread ?? 0).toFixed(4)}`,
+        `cashBudget=$${cashBudget}`,
+        `shares=${quote.shares.toFixed(2)}`,
+      ],
+      signalAgeSeconds: signalDelaySec,
+      intendedPositionSize: cashBudget,
+      executableAsk: quote.bestAsk,
+      allInPrice: quote.allInPrice,
+      fee: quote.fee,
+      spread: quote.spread,
+      shares: quote.shares,
     });
 
     await prisma.paperTrade.create({

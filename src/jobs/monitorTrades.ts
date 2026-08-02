@@ -4,12 +4,16 @@ import { isLive } from "../lib/config.js";
 import { getWalletTrades } from "../adapters/trades.js";
 import { getMarketBySlug } from "../adapters/polymarket.js";
 
+export function trackedWalletWhere(): { status: "track" } {
+  return { status: "track" };
+}
+
 export async function runMonitorTrades(): Promise<void> {
   if (!isLive) {
     console.log("DEMO mode: skipping live trade monitor");
     return;
   }
-  const tracked = await prisma.walletProfile.findMany({ where: { status: { in: ["track", "watch"] } } });
+  const tracked = await prisma.walletProfile.findMany({ where: trackedWalletWhere() });
   if (!tracked.length) {
     console.log("monitorTrades: no tracked wallets found");
     return;

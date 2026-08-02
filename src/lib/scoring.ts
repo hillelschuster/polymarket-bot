@@ -188,6 +188,60 @@ export function segmentSize(segment: MarketSegment): number {
   }
 }
 
+export interface WalletCopyPerformanceTrade {
+  walletAddress: string;
+  slug: string | null;
+  source: string;
+  status: string;
+  realizedPnl: number | null;
+  openedAt: Date;
+  resolvedAt: Date | null;
+}
+
+export interface WalletCopyPerformance {
+  count: number;
+  wins: number;
+  winRate: number;
+  avgPnl: number;
+}
+
+/**
+ * Build the wallet×segment record that was knowable before an observation.
+ * Only terminal wallet-copy outcomes count; open, legacy-closed, strategy, and
+ * not-yet-resolved outcomes stay out of the sizing and copy-skill history.
+ */
+export function priorWalletCopyPerformance(
+  trades: WalletCopyPerformanceTrade[],
+  walletAddress: string,
+  segment: MarketSegment,
+  before: Date | null,
+): WalletCopyPerformance {
+  const prior = trades.filter((trade) => {
+    if (trade.walletAddress !== walletAddress || trade.source !== "wallet_copy" || trade.status !== "resolved") return false;
+    if (!before || !trade.resolvedAt || trade.openedAt >= before || trade.resolvedAt >= before) return false;
+    return segmentFromSlug(trade.slug) === segment;
+  });
+  const wins = prior.filter((trade) => (trade.realizedPnl ?? 0) > 0).length;
+  const pnl = prior.reduce((sum, trade) => sum + (trade.realizedPnl ?? 0), 0);
+  return {
+    count: prior.length,
+    wins,
+    winRate: prior.length ? wins / prior.length : 0,
+    avgPnl: prior.length ? pnl / prior.length : 0,
+  };
+}
+
+/** Mainline keeps its global-score bypass, but unproven wallets use $5. */
+export function mainlinePositionSize(
+  walletQualityScore: number | null,
+  minWalletGlobal: number,
+  performance: WalletCopyPerformance,
+): number {
+  const qualityQualified = walletQualityScore != null && walletQualityScore >= minWalletGlobal;
+  const copyQualified = performance.count >= 3 && performance.winRate >= 0.4 && performance.avgPnl > 0;
+  return qualityQualified || copyQualified ? 20 : 5;
+}
+
 /**
  * Whether the minWalletGlobal gate is bypassed for this segment.
  * sports_mainline has proven edge independent of leaderboard heuristics;

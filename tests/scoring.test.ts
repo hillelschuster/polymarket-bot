@@ -302,11 +302,9 @@ describe("globalScore gate bypass (mainline edge protection)", () => {
     expect(bypassesGlobalScoreGate(segmentFromSlug("nba-lakers-celtics-2026-01-15"))).toBe(false);
   });
 
-  it("monitor query includes track and watch (not ignore)", () => {
-    // This validates the filter shape used in monitorTrades.ts
-    const monitorFilter = { in: ["track", "watch"] };
-    expect(monitorFilter.in).toContain("track");
-    expect(monitorFilter.in).toContain("watch");
-    expect(monitorFilter.in).not.toContain("ignore");
+  it("monitor query includes track only", () => {
+    // The fast path must not poll watch wallets.
+    const monitorFilter = { status: "track" };
+    expect(monitorFilter).toEqual({ status: "track" });
   });
 });

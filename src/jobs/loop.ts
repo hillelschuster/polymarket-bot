@@ -15,6 +15,7 @@
 //   LOOP_MAX_PASSES (default Infinity)
 
 import { runFastPath, runSlowPath } from "./runAll.js";
+import { logStartupContext } from "../lib/runtime.js";
 
 // Safety net: never let an unhandled rejection/exception kill the overnight loop.
 process.on("uncaughtException", (e) => console.error("uncaughtException:", (e as Error).message));
@@ -25,6 +26,7 @@ const SLOW_EVERY_N_PASSES = Number(process.env.SLOW_EVERY_N_PASSES ?? 4);
 const MAX_PASSES = process.env.LOOP_MAX_PASSES ? Number(process.env.LOOP_MAX_PASSES) : Infinity;
 
 async function main() {
+  logStartupContext();
   let pass = 0;
 
   // Run slow path once on startup to ensure wallet scores are populated

@@ -71,6 +71,7 @@ model ObservedTrade {
   createdAt        DateTime         @default(now())
   wallet           WalletProfile?   @relation(fields: [walletAddress], references: [address])
   decision         DecisionJournal?
+  @@index([timestamp])
 }
 
 model MarketSnapshot {
@@ -112,11 +113,32 @@ model DecisionJournal {
   liquidityScore        Float?
   thesisScore           Float?
   simulatedPositionSize Float?
+  logicVersion          String?
+  gitSha                String?
+  runId                 String?
+  ruleSetId             String?
+  ruleSetVersion        Int?
+  walletStatus          String?
+  sourceRank            Int?
+  marketSegment         String?
+  priorSameSegmentResolvedCount Int?
+  priorSameSegmentWins          Int?
+  priorSameSegmentAveragePnl    Float?
+  signalAgeSeconds      Float?
+  firstFailingGate      String?
+  intendedPositionSize  Float?
+  eventExposureBefore   Float?
+  executableAsk         Float?
+  allInPrice            Float?
+  fee                   Float?
+  spread                Float?
+  shares                Float?
   createdAt             DateTime       @default(now())
   observedTrade         ObservedTrade? @relation(fields: [observedTradeId], references: [id])
   outcomeReview         OutcomeReview?
   paperTrade            PaperTrade?
   liveOrder             LiveOrder?
+  @@index([decision, createdAt])
 }
 
 model PaperTrade {
@@ -141,6 +163,7 @@ model PaperTrade {
   resolvedAt            DateTime?
   decisionJournal       DecisionJournal? @relation(fields: [decisionJournalId], references: [id])
   pnlSnapshots          PnlSnapshot[]
+  @@index([walletAddress, status])
 }
 
 model PnlSnapshot {
@@ -150,6 +173,7 @@ model PnlSnapshot {
   pnl          Float?
   collectedAt  DateTime    @default(now())
   paperTrade   PaperTrade? @relation(fields: [paperTradeId], references: [id])
+  @@index([paperTradeId])
 }
 
 model OutcomeReview {
@@ -260,6 +284,13 @@ model DailyReport {
   worstWalletsJson String?
   ruleChangesJson  String?
   summary          String?
+  resolvedWalletCopyPnl       Float?
+  resolvedStrategyPnl         Float?
+  legacyClosedStopLossPnl     Float?
+  openWalletCopyUnrealizedPnl Float?
+  openStrategyUnrealizedPnl   Float?
+  combinedAccountingTotal     Float?
+  resolvedWalletCopyWinRate   Float?
   sentToTelegram   Boolean  @default(false)
   createdAt        DateTime @default(now())
 }
