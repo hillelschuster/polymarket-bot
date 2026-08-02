@@ -379,6 +379,10 @@ export async function runScoreTrades(): Promise<void> {
     existingCopies.add(dedupKey);
     // Track event exposure for the per-event cap
     eventExposure.set(slugKey, alreadyDeployed + cashBudget);
+    // Count the new open copy immediately so the diversification cap
+    // (maxCopiesPerWallet) is enforced within this same pass, not only
+    // against the DB snapshot taken at pass start.
+    walletOpenCount.set(pt.walletAddress, (walletOpenCount.get(pt.walletAddress) ?? 0) + 1);
     copied++;
     console.log(`  COPY: ${ot.slug?.slice(0, 35)} @ ${quote.allInPrice.toFixed(4)} (ask=${quote.bestAsk?.toFixed(3)} fee=${quote.fee.toFixed(4)} delay=${signalDelaySec?.toFixed(0)}s $${cashBudget})`);
 

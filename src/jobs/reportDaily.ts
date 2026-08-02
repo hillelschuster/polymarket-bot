@@ -19,11 +19,15 @@ export async function runReportDaily(): Promise<void> {
   const resolved = allPaperTrades.filter((trade) => trade.status === "resolved");
   const resolvedWalletCopy = resolved.filter((trade) => trade.source === "wallet_copy");
   const pnl = summarizePnl(allPaperTrades);
-  const totalPnl = pnl.combinedAccountingTotal;
+  // paperPnl = realized-only accounting PnL (resolved wallet-copy + resolved strategy
+  // + legacy closed stop-loss). Unrealized belongs in combinedAccountingTotal only.
+  const accountingPnl = pnl.resolvedWalletCopyPnl + pnl.resolvedStrategyPnl + pnl.legacyClosedStopLossPnl;
   const wins = pnl.resolvedWalletCopyWins;
   const winRate = pnl.resolvedWalletCopyWinRate;
 
-  const journals = await prisma.decisionJournal.findMany({ take: 100 });
+  // Daily decision counts: decisions created since the local day boundary, not an
+  // arbitrary trailing window (take:100 mixed eras and undercounted busy days).
+  const journals = await prisma.decisionJournal.findMany({ where: { createdAt: { gte: today } } });
   const copied = journals.filter((j) => j.decision === "paper_copy").length;
   const watched = journals.filter((j) => j.decision === "watchlist").length;
   const skipped = journals.filter((j) => j.decision === "skip").length;
@@ -121,32 +125,36 @@ export async function runReportDaily(): Promise<void> {
     include: { newRuleSet: true },
   });
 
+  // One data object for create AND update so re-runs on the same day refresh the
+  // row instead of silently keeping the first (possibly stale) snapshot.
+  const reportData = {
+    date: today,
+    paperPnl: accountingPnl,
+    winRate,
+    openPositions,
+    newSignals: journals.length,
+    copiedSignals: copied,
+    watchedSignals: watched,
+    skippedSignals: skipped,
+    bestWalletsJson: JSON.stringify(bestResolved.map((t) => ({ address: t.walletAddress, pnl: t.realizedPnl }))),
+    worstWalletsJson: JSON.stringify(worstResolved.map((t) => ({ address: t.walletAddress, pnl: t.realizedPnl }))),
+    ruleChangesJson: JSON.stringify(ruleChanges.map((rc) => ({ id: rc.id, reason: rc.reason }))),
+    winningPositions,
+    unrealizedPnl: totalUnrealized,
+    resolvedWalletCopyPnl: pnl.resolvedWalletCopyPnl,
+    resolvedStrategyPnl: pnl.resolvedStrategyPnl,
+    legacyClosedStopLossPnl: pnl.legacyClosedStopLossPnl,
+    openWalletCopyUnrealizedPnl: pnl.openWalletCopyUnrealizedPnl,
+    openStrategyUnrealizedPnl: pnl.openStrategyUnrealizedPnl,
+    combinedAccountingTotal: pnl.combinedAccountingTotal,
+    resolvedWalletCopyWinRate: pnl.resolvedWalletCopyWinRate,
+    summary: `Resolved wallet-copy: $${pnl.resolvedWalletCopyPnl.toFixed(2)} | WR: ${wins}/${pnl.resolvedWalletCopyCount} (${(winRate * 100).toFixed(1)}%) | Resolved strategy: $${pnl.resolvedStrategyPnl.toFixed(2)} | Legacy closed stop-loss: $${pnl.legacyClosedStopLossPnl.toFixed(2)} | Open wallet-copy unrealized: $${pnl.openWalletCopyUnrealizedPnl.toFixed(2)} | Open strategy unrealized: $${pnl.openStrategyUnrealizedPnl.toFixed(2)} | Combined accounting total (includes legacy losses): $${pnl.combinedAccountingTotal.toFixed(2)} | BeatBlind: ${beatBlindCopy === null ? 'N/A' : beatBlindCopy}`,
+  };
+
   const report = await prisma.dailyReport.upsert({
     where: { date: today },
-    create: {
-      date: today,
-      paperPnl: totalPnl,
-      winRate,
-      openPositions,
-      newSignals: journals.length,
-      copiedSignals: copied,
-      watchedSignals: watched,
-      skippedSignals: skipped,
-      bestWalletsJson: JSON.stringify(bestResolved.map((t) => ({ address: t.walletAddress, pnl: t.realizedPnl }))),
-      worstWalletsJson: JSON.stringify(worstResolved.map((t) => ({ address: t.walletAddress, pnl: t.realizedPnl }))),
-      ruleChangesJson: JSON.stringify(ruleChanges.map((rc) => ({ id: rc.id, reason: rc.reason }))),
-      winningPositions,
-      unrealizedPnl: totalUnrealized,
-      resolvedWalletCopyPnl: pnl.resolvedWalletCopyPnl,
-      resolvedStrategyPnl: pnl.resolvedStrategyPnl,
-      legacyClosedStopLossPnl: pnl.legacyClosedStopLossPnl,
-      openWalletCopyUnrealizedPnl: pnl.openWalletCopyUnrealizedPnl,
-      openStrategyUnrealizedPnl: pnl.openStrategyUnrealizedPnl,
-      combinedAccountingTotal: pnl.combinedAccountingTotal,
-      resolvedWalletCopyWinRate: pnl.resolvedWalletCopyWinRate,
-      summary: `Resolved wallet-copy: $${pnl.resolvedWalletCopyPnl.toFixed(2)} | WR: ${wins}/${pnl.resolvedWalletCopyCount} (${(winRate * 100).toFixed(1)}%) | Resolved strategy: $${pnl.resolvedStrategyPnl.toFixed(2)} | Legacy closed stop-loss: $${pnl.legacyClosedStopLossPnl.toFixed(2)} | Open wallet-copy unrealized: $${pnl.openWalletCopyUnrealizedPnl.toFixed(2)} | Open strategy unrealized: $${pnl.openStrategyUnrealizedPnl.toFixed(2)} | Combined accounting total (includes legacy losses): $${pnl.combinedAccountingTotal.toFixed(2)} | BeatBlind: ${beatBlindCopy === null ? 'N/A' : beatBlindCopy}`,
-    },
-    update: {},
+    create: reportData,
+    update: reportData,
   });
 
   if (config.TELEGRAM_BOT_TOKEN && config.TELEGRAM_CHAT_ID) {
