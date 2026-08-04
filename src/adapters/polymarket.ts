@@ -1,4 +1,6 @@
 // Public Polymarket market-data clients. No authentication or execution.
+import { quoteBuyWithCash, quoteSellSharesExact } from "../lib/executableQuotes.js";
+import type { FeeModel } from "./marketFees.js";
 export const DATA_API = "https://data-api.polymarket.com";
 export const GAMMA_API = "https://gamma-api.polymarket.com";
 export const CLOB_API = "https://clob.polymarket.com";
@@ -228,12 +230,20 @@ export function quoteSellShares(book: OrderBook, feeRateBps: number, targetShare
   };
 }
 
-export async function getExecutableBuyQuote(tokenId: string, cashBudget: number): Promise<BuyQuote | null> {
+export async function getExecutableBuyQuote(tokenId: string, cashBudget: number, feeModel?: FeeModel): Promise<BuyQuote | null> {
+  if (feeModel) {
+    const book = await getOrderBook(tokenId);
+    return quoteBuyWithCash(book, feeModel, cashBudget);
+  }
   const [book, feeRateBps] = await Promise.all([getOrderBook(tokenId), getFeeRateBps(tokenId)]);
   return quoteBuyCash(book, feeRateBps, cashBudget);
 }
 
-export async function getExecutableSellQuote(tokenId: string, shares: number): Promise<SellQuote | null> {
+export async function getExecutableSellQuote(tokenId: string, shares: number, feeModel?: FeeModel): Promise<SellQuote | null> {
+  if (feeModel) {
+    const book = await getOrderBook(tokenId);
+    return quoteSellSharesExact(book, feeModel, shares);
+  }
   const [book, feeRateBps] = await Promise.all([getOrderBook(tokenId), getFeeRateBps(tokenId)]);
   return quoteSellShares(book, feeRateBps, shares);
 }

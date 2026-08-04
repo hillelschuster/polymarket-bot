@@ -4,13 +4,12 @@ import { prisma } from "../lib/db.js";
 import type { Prisma } from "@prisma/client";
 import {
   getActiveMarkets,
-  getFeeRateBps,
   getOrderBook,
-  quoteBuyShares,
-  quoteSellShares,
   type GammaMarket,
   type OrderBook,
 } from "../adapters/polymarket.js";
+import { getFeeModel, type FeeModel } from "../adapters/marketFees.js";
+import { quoteBuySharesExact, quoteSellSharesExact } from "../lib/executableQuotes.js";
 import { findCalendarPairs, outcomeToken } from "../lib/calendarArbitrage.js";
 
 const STRATEGY_NAME = "calendar_arb";
@@ -79,14 +78,14 @@ export async function runScanCalendarArbitrage(): Promise<CalendarScanResult> {
 
     let earlyBook: OrderBook;
     let lateBook: OrderBook;
-    let earlyFeeBps: number;
-    let lateFeeBps: number;
+    let earlyFeeModel: FeeModel;
+    let lateFeeModel: FeeModel;
     try {
-      [earlyBook, lateBook, earlyFeeBps, lateFeeBps] = await Promise.all([
+      [earlyBook, lateBook, earlyFeeModel, lateFeeModel] = await Promise.all([
         getOrderBook(earlyNoToken),
         getOrderBook(lateYesToken),
-        getFeeRateBps(earlyNoToken),
-        getFeeRateBps(lateYesToken),
+        getFeeModel(earlyNoToken, early.conditionId ?? early.id),
+        getFeeModel(lateYesToken, late.conditionId ?? late.id),
       ]);
     } catch {
       skip("quote-failed");
@@ -95,15 +94,15 @@ export async function runScanCalendarArbitrage(): Promise<CalendarScanResult> {
 
     const earlyProbeShares = Math.max(1, Number(earlyBook.min_order_size ?? 1));
     const lateProbeShares = Math.max(1, Number(lateBook.min_order_size ?? 1));
-    const earlyTop = quoteBuyShares(earlyBook, earlyFeeBps, earlyProbeShares);
-    const lateTop = quoteBuyShares(lateBook, lateFeeBps, lateProbeShares);
+    const earlyTop = quoteBuySharesExact(earlyBook, earlyFeeModel, earlyProbeShares);
+    const lateTop = quoteBuySharesExact(lateBook, lateFeeModel, lateProbeShares);
     if (!earlyTop || !lateTop) { skip("empty-book"); continue; }
     const topCombined = earlyTop.allInPrice + lateTop.allInPrice;
     if (topCombined <= 0 || topCombined > MAX_COMBINED_COST) { skip("cost-too-high"); continue; }
 
     const shares = BASKET_CASH / topCombined;
-    const earlyBuy = quoteBuyShares(earlyBook, earlyFeeBps, shares);
-    const lateBuy = quoteBuyShares(lateBook, lateFeeBps, shares);
+    const earlyBuy = quoteBuySharesExact(earlyBook, earlyFeeModel, shares);
+    const lateBuy = quoteBuySharesExact(lateBook, lateFeeModel, shares);
     if (!earlyBuy || !lateBuy) { skip("insufficient-depth"); continue; }
     if (earlyBuy.spread == null || lateBuy.spread == null || earlyBuy.spread > MAX_LEG_SPREAD || lateBuy.spread > MAX_LEG_SPREAD) {
       skip("wide-spread");
@@ -113,8 +112,8 @@ export async function runScanCalendarArbitrage(): Promise<CalendarScanResult> {
     const combinedCost = earlyBuy.allInPrice + lateBuy.allInPrice;
     if (combinedCost > MAX_COMBINED_COST) { skip("cost-too-high-after-depth"); continue; }
 
-    const earlyMark = quoteSellShares(earlyBook, earlyFeeBps, shares)?.netPrice ?? earlyBuy.bestBid ?? earlyBuy.averageAsk;
-    const lateMark = quoteSellShares(lateBook, lateFeeBps, shares)?.netPrice ?? lateBuy.bestBid ?? lateBuy.averageAsk;
+    const earlyMark = quoteSellSharesExact(earlyBook, earlyFeeModel, shares)?.netPrice ?? earlyBuy.bestBid ?? earlyBuy.averageAsk;
+    const lateMark = quoteSellSharesExact(lateBook, lateFeeModel, shares)?.netPrice ?? lateBuy.bestBid ?? lateBuy.averageAsk;
     const edge = 1 - combinedCost;
     const reasons = JSON.stringify([
       `calendar arb: early NO + late YES`,

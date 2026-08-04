@@ -7,6 +7,7 @@ import { prisma } from "../lib/db.js";
 import { scoreTradeByMarket, DEFAULT_RULES, walletCopySkipReason, categoryFromSlug, segmentFromSlug, segmentSize, getFavoriteGate, mainlinePositionSize, priorWalletCopyPerformance, type RuleSetValues, type MarketSegment } from "../lib/scoring.js";
 import { createPaperTrade } from "../lib/paper.js";
 import { getMarketBySlug, getExecutableBuyQuote } from "../adapters/polymarket.js";
+import { getFeeModel } from "../adapters/marketFees.js";
 import { realTradingEnabled } from "../lib/config.js";
 import { executeWalletCopyOrder } from "../lib/liveExecution.js";
 import { createDecisionJournal, LOGIC_VERSION, type DecisionJournalInput } from "../lib/decisionJournal.js";
@@ -295,7 +296,9 @@ export async function runScoreTrades(): Promise<void> {
 
     let quote;
     try {
-      quote = await getExecutableBuyQuote(ot.tokenId, cashBudget);
+      // Market-specific fee exponent via conditionId; fail-closed through the catch below.
+      const feeModel = await getFeeModel(ot.tokenId, m?.conditionId ?? ot.marketId);
+      quote = await getExecutableBuyQuote(ot.tokenId, cashBudget, feeModel);
     } catch {
       quote = null;
     }

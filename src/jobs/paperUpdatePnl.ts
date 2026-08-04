@@ -2,6 +2,7 @@
 import { prisma } from "../lib/db.js";
 import { hourlyPnl, closePaperTrade } from "../lib/paper.js";
 import { getExecutableSellQuote } from "../adapters/polymarket.js";
+import { getFeeModel } from "../adapters/marketFees.js";
 import { DEFAULT_RULES } from "../lib/scoring.js";
 
 export async function runPaperUpdatePnl(): Promise<void> {
@@ -26,7 +27,9 @@ export async function runPaperUpdatePnl(): Promise<void> {
     const shares = cashInvested / entryPrice;
     let quote;
     try {
-      quote = await getExecutableSellQuote(pt.tokenId, shares);
+      // Same market-specific fee model as entries; failures skip through the catch.
+      const feeModel = await getFeeModel(pt.tokenId, pt.marketId);
+      quote = await getExecutableSellQuote(pt.tokenId, shares, feeModel);
     } catch {
       skipped++;
       continue;

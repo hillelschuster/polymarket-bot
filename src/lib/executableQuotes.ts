@@ -84,3 +84,41 @@ export function quoteSellSharesExact(book: OrderBook, feeModel: FeeModel, shares
     spread: top.spread,
   };
 }
+
+export function quoteBuyWithCash(book: OrderBook, feeModel: FeeModel, cashBudget: number): BuyQuote | null {
+  if (!(cashBudget > 0)) return null;
+  const asks = [...(book.asks ?? [])]
+    .map((x) => ({ price: Number(x.price), size: Number(x.size) }))
+    .filter((x) => Number.isFinite(x.price) && Number.isFinite(x.size) && x.price > 0 && x.price < 1 && x.size > 0)
+    .sort((a, b) => a.price - b.price);
+
+  let remainingCash = cashBudget;
+  let shares = 0;
+  let notional = 0;
+  let fee = 0;
+  for (const level of asks) {
+    const feePerShare = takerFeePerShare(level.price, feeModel);
+    const allInPerShare = level.price + feePerShare;
+    const take = Math.min(level.size, remainingCash / allInPerShare);
+    shares += take;
+    notional += take * level.price;
+    fee += take * feePerShare;
+    remainingCash -= take * allInPerShare;
+    if (remainingCash <= 1e-7) break;
+  }
+  if (remainingCash > 0.005 || shares <= 0) return null;
+  if (!minimumOrderPasses(book, shares)) return null;
+  const top = edges(book);
+  if (top.bestAsk == null) return null;
+  const cashCost = notional + fee;
+  return {
+    shares,
+    cashCost,
+    averageAsk: notional / shares,
+    fee,
+    allInPrice: cashCost / shares,
+    bestBid: top.bestBid,
+    bestAsk: top.bestAsk,
+    spread: top.spread,
+  };
+}

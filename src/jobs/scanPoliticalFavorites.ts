@@ -2,13 +2,12 @@
 import { prisma } from "../lib/db.js";
 import {
   getActiveMarkets,
-  getFeeRateBps,
   getOrderBook,
-  quoteBuyCash,
-  quoteSellShares,
   type GammaMarket,
   type OrderBook,
 } from "../adapters/polymarket.js";
+import { getFeeModel, type FeeModel } from "../adapters/marketFees.js";
+import { quoteBuyWithCash, quoteSellSharesExact } from "../lib/executableQuotes.js";
 import { categoryFromSlug } from "../lib/scoring.js";
 
 const STRATEGY_NAME = "political_favorites";
@@ -122,15 +121,18 @@ export async function runScanPoliticalFavorites(): Promise<ScanResult> {
     if (existing) { skip("duplicate"); continue; }
 
     let book: OrderBook;
-    let feeRateBps: number;
+    let feeModel: FeeModel;
     try {
-      [book, feeRateBps] = await Promise.all([getOrderBook(tokenId), getFeeRateBps(tokenId)]);
+      [book, feeModel] = await Promise.all([
+        getOrderBook(tokenId),
+        getFeeModel(tokenId, m.conditionId ?? m.id),
+      ]);
     } catch {
       skip("quote-failed");
       continue;
     }
 
-    const buy = quoteBuyCash(book, feeRateBps, POSITION_SIZE);
+    const buy = quoteBuyWithCash(book, feeModel, POSITION_SIZE);
     if (!buy) { skip("insufficient-depth"); continue; }
     if (buy.spread == null || buy.spread > MAX_SPREAD) { skip("wide-spread"); continue; }
     if (buy.averageAsk < MIN_FAVORITE_PRICE || buy.averageAsk > MAX_FAVORITE_PRICE) { skip("ask-out-of-range"); continue; }
@@ -140,7 +142,7 @@ export async function runScanPoliticalFavorites(): Promise<ScanResult> {
     const edgeEstimate = probability - buy.allInPrice;
     if (edgeEstimate < MIN_NET_EDGE) { skip("net-edge-too-small"); continue; }
 
-    const mark = quoteSellShares(book, feeRateBps, buy.shares)?.netPrice ?? buy.bestBid ?? buy.averageAsk;
+    const mark = quoteSellSharesExact(book, feeModel, buy.shares)?.netPrice ?? buy.bestBid ?? buy.averageAsk;
     const reasons = [
       `electoral favorite: ${outcome}`,
       `executable ask=${buy.averageAsk.toFixed(4)} all-in=${buy.allInPrice.toFixed(4)} fee=$${buy.fee.toFixed(4)}`,
