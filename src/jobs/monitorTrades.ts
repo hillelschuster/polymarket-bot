@@ -35,7 +35,10 @@ export async function runMonitorTrades(): Promise<void> {
   const marketFor = (slug: string) => {
     let p = mktCache.get(slug);
     if (!p) {
-      p = getMarketBySlug(slug).catch((e) => {
+      // includeClosed:false — monitor only needs category/liquidity/spread from
+      // open markets. Skipping the closed=true fallback halves the gamma traffic
+      // from this hot path (which is the dominant source of 429s).
+      p = getMarketBySlug(slug, { includeClosed: false }).catch((e) => {
         mktCache.delete(slug); // don't pin the failure; allow a later retry
         throw e;
       });

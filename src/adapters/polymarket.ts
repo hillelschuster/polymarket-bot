@@ -5,6 +5,35 @@ export const DATA_API = "https://data-api.polymarket.com";
 export const GAMMA_API = "https://gamma-api.polymarket.com";
 export const CLOB_API = "https://clob.polymarket.com";
 
+// --- Global per-host request pacing ---
+// A single shared queue per host serializes every outbound request and spaces
+// them MIN_GAP_MS apart. With 3 bots on the same IP this is the only way to stay
+// under gamma's rate limit: no two requests from this process ever fire back to
+// back, so we never contribute to the burst that triggers 429s.
+const hostLast = new Map<string, number>();
+const hostQueues = new Map<string, Promise<unknown>>();
+const MIN_GAP_MS = Number(process.env.POLYMARKET_MIN_GAP_MS ?? 150);
+
+function pacedFetch(url: string, init: RequestInit, timeoutMs: number): Promise<Response> {
+  const host = new URL(url).host;
+  const prev = hostQueues.get(host) ?? Promise.resolve();
+  const run = prev.then(async () => {
+    const last = hostLast.get(host) ?? 0;
+    const wait = last + MIN_GAP_MS - Date.now();
+    if (wait > 0) await new Promise((r) => setTimeout(r, wait));
+    hostLast.set(host, Date.now());
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    try {
+      return await fetch(url, { ...init, signal: controller.signal });
+    } finally {
+      clearTimeout(timer);
+    }
+  });
+  hostQueues.set(host, run.then(() => undefined, () => undefined));
+  return run;
+}
+
 export class FetchError extends Error {
   constructor(public status: number, public body: string) {
     super(`Polymarket API failed: ${status} ${body}`);
@@ -16,14 +45,14 @@ export async function fetchJson<T>(url: string, opts: RequestInit = {}, retries 
   if (process.env.POLYMARKET_API_KEY) headers["x-api-key"] = process.env.POLYMARKET_API_KEY;
   let attempt = 0;
   while (true) {
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), 10_000);
     try {
-      const res = await fetch(url, { ...opts, headers, signal: controller.signal });
+      const res = await pacedFetch(url, { ...opts, headers }, 10_000);
       if (res.ok) return res.json() as Promise<T>;
       if ((res.status === 429 || res.status >= 500) && attempt < retries) {
         const retryAfter = Number(res.headers.get("retry-after") ?? 0);
-        const wait = retryAfter > 0 ? retryAfter * 1000 : Math.min(2 ** attempt * 1000, 8000);
+        // 429s get a longer floor so the shared API can breathe; respect Retry-After if given.
+        const base = res.status === 429 ? 1500 : 1000;
+        const wait = retryAfter > 0 ? retryAfter * 1000 : Math.max(base, Math.min(2 ** attempt * 1000, 8000));
         console.warn(`fetchJson: ${res.status} on ${url} (attempt ${attempt + 1}/${retries}); backing off ${wait}ms`);
         await new Promise((r) => setTimeout(r, wait));
         attempt++;
@@ -40,8 +69,6 @@ export async function fetchJson<T>(url: string, opts: RequestInit = {}, retries 
         continue;
       }
       throw e;
-    } finally {
-      clearTimeout(timer);
     }
   }
 }
@@ -305,17 +332,39 @@ function normalizeGammaMarket(m: any): GammaMarket {
   };
 }
 
-export async function getMarketBySlug(slug: string): Promise<GammaMarket | null> {
+export interface MarketBySlugOpts {
+  /** Also query closed=true when the market isn't found in the default (open) endpoint. */
+  includeClosed?: boolean;
+}
+
+// Persistent in-process slug cache. The loop re-derives the same market slugs
+// across passes (sports games, events that persist for hours); without this the
+// already-deduped-per-pass cache is flushed every ~7 min and gamma is re-hit for
+// data we already have. TTL is short enough that entry-relevant prices stay fresh.
+const MARKET_CACHE_TTL_MS = Number(process.env.MARKET_CACHE_TTL_MS ?? 15 * 60 * 1000);
+const marketCache = new Map<string, { ts: number; market: GammaMarket | null }>();
+
+export async function getMarketBySlug(slug: string, opts: MarketBySlugOpts = {}): Promise<GammaMarket | null> {
+  const includeClosed = opts.includeClosed ?? true;
+  const key = `${slug}|${includeClosed ? "c" : "o"}`;
+  const hit = marketCache.get(key);
+  if (hit && Date.now() - hit.ts < MARKET_CACHE_TTL_MS) return hit.market;
+
   const qs = new URLSearchParams({ slug, limit: "1" });
   const arr = await fetchJson<any[]>(`${GAMMA_API}/markets?${qs}`);
   const m = Array.isArray(arr) ? arr[0] : null;
-  if (m) return normalizeGammaMarket(m);
+  let result = m ? normalizeGammaMarket(m) : null;
   // Fallback: Gamma removes resolved markets from the default endpoint.
-  // They are only retrievable with closed=true. Critical for reviewOutcomes.
-  const qs2 = new URLSearchParams({ slug, limit: "1", closed: "true" });
-  const arr2 = await fetchJson<any[]>(`${GAMMA_API}/markets?${qs2}`);
-  const m2 = Array.isArray(arr2) ? arr2[0] : null;
-  return m2 ? normalizeGammaMarket(m2) : null;
+  // Only retrievable with closed=true. Critical for reviewOutcomes.
+  if (!result && includeClosed) {
+    const qs2 = new URLSearchParams({ slug, limit: "1", closed: "true" });
+    const arr2 = await fetchJson<any[]>(`${GAMMA_API}/markets?${qs2}`);
+    const m2 = Array.isArray(arr2) ? arr2[0] : null;
+    result = m2 ? normalizeGammaMarket(m2) : null;
+  }
+
+  marketCache.set(key, { ts: Date.now(), market: result });
+  return result;
 }
 
 export interface ActiveMarketOpts {
