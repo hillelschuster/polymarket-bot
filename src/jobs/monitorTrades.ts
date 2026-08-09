@@ -35,10 +35,9 @@ export async function runMonitorTrades(): Promise<void> {
   const marketFor = (slug: string) => {
     let p = mktCache.get(slug);
     if (!p) {
-      // includeClosed:false — monitor only needs category/liquidity/spread from
-      // open markets. Skipping the closed=true fallback halves the gamma traffic
-      // from this hot path (which is the dominant source of 429s).
-      p = getMarketBySlug(slug, { includeClosed: false }).catch((e) => {
+      // Monitor only needs metadata enrichment, so it is the one hot path allowed
+      // to use the persistent slug cache. scoreTrades/reviewOutcomes stay fresh.
+      p = getMarketBySlug(slug, { includeClosed: false, cache: true }).catch((e) => {
         mktCache.delete(slug); // don't pin the failure; allow a later retry
         throw e;
       });
