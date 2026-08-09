@@ -6,11 +6,14 @@ export const GAMMA_API = "https://gamma-api.polymarket.com";
 export const CLOB_API = "https://clob.polymarket.com";
 
 // Gamma is the shared-IP bottleneck. Pace only Gamma so CLOB executable-book
-// requests and already-paced wallet polling remain concurrent/fresh.
+// requests and already-paced wallet polling remain concurrent/fresh. Request
+// starts are spaced, but up to three Gamma requests may remain in flight.
 const GAMMA_HOST = new URL(GAMMA_API).host;
 const GAMMA_MIN_GAP_MS = Number(process.env.POLYMARKET_MIN_GAP_MS ?? 150);
-let gammaLastRequestAt = 0;
-let gammaQueue: Promise<unknown> = Promise.resolve();
+const GAMMA_MAX_CONCURRENT = 3;
+let gammaNextStartAt = 0;
+let gammaActive = 0;
+const gammaWaiters: Array<() => void> = [];
 
 async function fetchWithTimeout(url: string, init: RequestInit, timeoutMs: number): Promise<Response> {
   const controller = new AbortController();
@@ -22,17 +25,35 @@ async function fetchWithTimeout(url: string, init: RequestInit, timeoutMs: numbe
   }
 }
 
-function pacedFetch(url: string, init: RequestInit, timeoutMs: number): Promise<Response> {
+async function acquireGammaSlot(): Promise<() => void> {
+  while (gammaActive >= GAMMA_MAX_CONCURRENT) {
+    await new Promise<void>((resolve) => gammaWaiters.push(resolve));
+  }
+
+  gammaActive++;
+  const now = Date.now();
+  const startAt = Math.max(now, gammaNextStartAt);
+  gammaNextStartAt = startAt + GAMMA_MIN_GAP_MS;
+  if (startAt > now) await new Promise((resolve) => setTimeout(resolve, startAt - now));
+
+  let released = false;
+  return () => {
+    if (released) return;
+    released = true;
+    gammaActive--;
+    gammaWaiters.shift()?.();
+  };
+}
+
+async function pacedFetch(url: string, init: RequestInit, timeoutMs: number): Promise<Response> {
   if (new URL(url).host !== GAMMA_HOST) return fetchWithTimeout(url, init, timeoutMs);
 
-  const run = gammaQueue.then(async () => {
-    const wait = gammaLastRequestAt + GAMMA_MIN_GAP_MS - Date.now();
-    if (wait > 0) await new Promise((r) => setTimeout(r, wait));
-    gammaLastRequestAt = Date.now();
-    return fetchWithTimeout(url, init, timeoutMs);
-  });
-  gammaQueue = run.then(() => undefined, () => undefined);
-  return run;
+  const release = await acquireGammaSlot();
+  try {
+    return await fetchWithTimeout(url, init, timeoutMs);
+  } finally {
+    release();
+  }
 }
 
 export class FetchError extends Error {
