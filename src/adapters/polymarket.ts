@@ -5,32 +5,33 @@ export const DATA_API = "https://data-api.polymarket.com";
 export const GAMMA_API = "https://gamma-api.polymarket.com";
 export const CLOB_API = "https://clob.polymarket.com";
 
-// --- Global per-host request pacing ---
-// A single shared queue per host serializes every outbound request and spaces
-// them MIN_GAP_MS apart. With 3 bots on the same IP this is the only way to stay
-// under gamma's rate limit: no two requests from this process ever fire back to
-// back, so we never contribute to the burst that triggers 429s.
-const hostLast = new Map<string, number>();
-const hostQueues = new Map<string, Promise<unknown>>();
-const MIN_GAP_MS = Number(process.env.POLYMARKET_MIN_GAP_MS ?? 150);
+// Gamma is the shared-IP bottleneck. Pace only Gamma so CLOB executable-book
+// requests and already-paced wallet polling remain concurrent/fresh.
+const GAMMA_HOST = new URL(GAMMA_API).host;
+const GAMMA_MIN_GAP_MS = Number(process.env.POLYMARKET_MIN_GAP_MS ?? 150);
+let gammaLastRequestAt = 0;
+let gammaQueue: Promise<unknown> = Promise.resolve();
+
+async function fetchWithTimeout(url: string, init: RequestInit, timeoutMs: number): Promise<Response> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await fetch(url, { ...init, signal: controller.signal });
+  } finally {
+    clearTimeout(timer);
+  }
+}
 
 function pacedFetch(url: string, init: RequestInit, timeoutMs: number): Promise<Response> {
-  const host = new URL(url).host;
-  const prev = hostQueues.get(host) ?? Promise.resolve();
-  const run = prev.then(async () => {
-    const last = hostLast.get(host) ?? 0;
-    const wait = last + MIN_GAP_MS - Date.now();
+  if (new URL(url).host !== GAMMA_HOST) return fetchWithTimeout(url, init, timeoutMs);
+
+  const run = gammaQueue.then(async () => {
+    const wait = gammaLastRequestAt + GAMMA_MIN_GAP_MS - Date.now();
     if (wait > 0) await new Promise((r) => setTimeout(r, wait));
-    hostLast.set(host, Date.now());
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), timeoutMs);
-    try {
-      return await fetch(url, { ...init, signal: controller.signal });
-    } finally {
-      clearTimeout(timer);
-    }
+    gammaLastRequestAt = Date.now();
+    return fetchWithTimeout(url, init, timeoutMs);
   });
-  hostQueues.set(host, run.then(() => undefined, () => undefined));
+  gammaQueue = run.then(() => undefined, () => undefined);
   return run;
 }
 
@@ -335,20 +336,23 @@ function normalizeGammaMarket(m: any): GammaMarket {
 export interface MarketBySlugOpts {
   /** Also query closed=true when the market isn't found in the default (open) endpoint. */
   includeClosed?: boolean;
+  /** Use the persistent 15-minute cache. Intended only for monitor metadata enrichment. */
+  cache?: boolean;
 }
 
-// Persistent in-process slug cache. The loop re-derives the same market slugs
-// across passes (sports games, events that persist for hours); without this the
-// already-deduped-per-pass cache is flushed every ~7 min and gamma is re-hit for
-// data we already have. TTL is short enough that entry-relevant prices stay fresh.
+// Persistent cache is opt-in: monitorTrades can reuse static-ish metadata without
+// feeding stale 15-minute market state into scoreTrades or resolution logic.
 const MARKET_CACHE_TTL_MS = Number(process.env.MARKET_CACHE_TTL_MS ?? 15 * 60 * 1000);
 const marketCache = new Map<string, { ts: number; market: GammaMarket | null }>();
 
 export async function getMarketBySlug(slug: string, opts: MarketBySlugOpts = {}): Promise<GammaMarket | null> {
   const includeClosed = opts.includeClosed ?? true;
+  const useCache = opts.cache ?? false;
   const key = `${slug}|${includeClosed ? "c" : "o"}`;
-  const hit = marketCache.get(key);
-  if (hit && Date.now() - hit.ts < MARKET_CACHE_TTL_MS) return hit.market;
+  if (useCache) {
+    const hit = marketCache.get(key);
+    if (hit && Date.now() - hit.ts < MARKET_CACHE_TTL_MS) return hit.market;
+  }
 
   const qs = new URLSearchParams({ slug, limit: "1" });
   const arr = await fetchJson<any[]>(`${GAMMA_API}/markets?${qs}`);
@@ -363,7 +367,7 @@ export async function getMarketBySlug(slug: string, opts: MarketBySlugOpts = {})
     result = m2 ? normalizeGammaMarket(m2) : null;
   }
 
-  marketCache.set(key, { ts: Date.now(), market: result });
+  if (useCache) marketCache.set(key, { ts: Date.now(), market: result });
   return result;
 }
 
