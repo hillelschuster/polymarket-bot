@@ -96,12 +96,12 @@ export const DEFAULT_RULES: RuleSetValues = {
   minLiquidity: 2_000,
   maxSpread: 0.10,
   maxPriceMovement: 0.12,            // tighter: skip trades where price already moved >12% in our favor since wallet entry
-  topThreshold: 0.80,               // skip BUY when outcome price >0.80 (overfavored extreme); skip SELL when <0.20
+  topThreshold: 0.75,               // skip BUY when outcome price >0.75 (overfavored extreme); skip SELL when <0.25
   maxAdverseMove: 0.05,             // skip BUY when price dropped >5% since wallet entry (bet already losing); SELL mirror
-  maxEntryGap: 0.10,               // skip if |copyPrice - walletFill| > 10% (post-fill entry leak; widened for 7-min cycle drift)
+  maxEntryGap: 0.05,               // skip if |copyPrice - walletFill| > 5% (post-fill entry leak)
   maxWalletLoss: -3,                // stop copying a wallet after it loses $3 total (prevents blow-ups like -$17.96)
-  maxCopiesPerWallet: 12,           // cap open copies per wallet (raised from 8: best wallets were getting blocked)
-  stopLossPct: 1.0,                 // disabled: pure hold-to-resolution (max loss = position size, no early exit)
+  maxCopiesPerWallet: 8,            // cap open copies per wallet so we diversify across many good wallets
+  stopLossPct: 0.5,                 // close open paper trades when unrealized loss > 50% of size (cuts catastrophic bleed)
   // Market-variable equation (wallet-independent primary selector)
   minFavoritePrice: 0.60,           // only bet favorites (backtest sweep: 0.60 → 44% win +$7.81; [0.60,0.65) bucket profitable)
   minMarketLiquidity: 10_000,       // WIDENED from 89K: small sample (45 trades) may be overfit
@@ -140,7 +140,6 @@ const CATEGORY_PREFIXES: Record<string, string> = {
   ucl: "sports", mex: "sports", mls: "sports", fifa: "sports", fifwc: "sports",
   wnba: "sports", ncaaf: "sports", ncaab: "sports", tennis: "sports", golf: "sports",
   ufc: "sports", boxing: "sports", f1: "sports", nascar: "sports",
-  wta: "sports", atp: "sports", itf: "sports", challenger: "sports",
   dota2: "esports", lol: "esports", cs2: "esports", csgo: "esports", val: "esports",
   valorant: "esports", overwatch: "esports", rl: "esports",
   crypto: "crypto", btc: "crypto", eth: "crypto", sol: "crypto", xrp: "crypto",
@@ -150,105 +149,6 @@ export function categoryFromSlug(slug?: string | null): string | null {
   if (!slug) return null;
   const tok = slug.split("-")[0].toLowerCase();
   return CATEGORY_PREFIXES[tok] ?? null;
-}
-
-// --- Market segment for sizing and wallet-skill segmentation ---
-export type MarketSegment = "sports_mainline" | "sports_derivative" | "tennis" | "other";
-
-const TENNIS_PREFIXES = new Set(["wta", "atp", "itf", "challenger"]);
-const DERIVATIVE_KEYWORDS = ["spread", "total", "totals", "set", "prop", "over", "under", "handicap", "run-line", "puck-line", "point-spread"];
-// Only MLB/UFC/F1 have proven edge (14/14 resolved, +42.9% ROI in replay).
-// All other sports stay at $5 exploratory until they produce their own evidence.
-const PROVEN_MAINLINE = new Set(["mlb", "ufc", "f1"]);
-
-/** Classify a market slug into a sizing/skill segment. */
-export function segmentFromSlug(slug?: string | null): MarketSegment {
-  if (!slug) return "other";
-  const s = slug.toLowerCase();
-  const prefix = s.split("-")[0];
-  // Tennis is its own segment (roughly market-efficient per audit)
-  if (TENNIS_PREFIXES.has(prefix)) return "tennis";
-  // Sports derivatives: spreads, totals, props (any sport)
-  const cat = CATEGORY_PREFIXES[prefix];
-  if (cat === "sports") {
-    if (DERIVATIVE_KEYWORDS.some((k) => s.includes(k))) return "sports_derivative";
-    // $20 mainline ONLY for proven sports (MLB/UFC/F1); others → $5 exploratory
-    if (PROVEN_MAINLINE.has(prefix)) return "sports_mainline";
-  }
-  return "other";
-}
-
-/** Deterministic segment-aware position size (dollars). */
-export function segmentSize(segment: MarketSegment): number {
-  switch (segment) {
-    case "sports_mainline": return 20;
-    case "sports_derivative": return 5;
-    case "tennis": return 5;
-    default: return 5;
-  }
-}
-
-export interface WalletCopyPerformanceTrade {
-  walletAddress: string;
-  slug: string | null;
-  source: string;
-  status: string;
-  realizedPnl: number | null;
-  openedAt: Date;
-  resolvedAt: Date | null;
-}
-
-export interface WalletCopyPerformance {
-  count: number;
-  wins: number;
-  winRate: number;
-  avgPnl: number;
-}
-
-/**
- * Build the wallet×segment record that was knowable before an observation.
- * Only terminal wallet-copy outcomes count; open, legacy-closed, strategy, and
- * not-yet-resolved outcomes stay out of the sizing and copy-skill history.
- */
-export function priorWalletCopyPerformance(
-  trades: WalletCopyPerformanceTrade[],
-  walletAddress: string,
-  segment: MarketSegment,
-  before: Date | null,
-): WalletCopyPerformance {
-  const prior = trades.filter((trade) => {
-    if (trade.walletAddress !== walletAddress || trade.source !== "wallet_copy" || trade.status !== "resolved") return false;
-    if (!before || !trade.resolvedAt || trade.openedAt >= before || trade.resolvedAt >= before) return false;
-    return segmentFromSlug(trade.slug) === segment;
-  });
-  const wins = prior.filter((trade) => (trade.realizedPnl ?? 0) > 0).length;
-  const pnl = prior.reduce((sum, trade) => sum + (trade.realizedPnl ?? 0), 0);
-  return {
-    count: prior.length,
-    wins,
-    winRate: prior.length ? wins / prior.length : 0,
-    avgPnl: prior.length ? pnl / prior.length : 0,
-  };
-}
-
-/** Mainline keeps its global-score bypass, but unproven wallets use $5. */
-export function mainlinePositionSize(
-  walletQualityScore: number | null,
-  minWalletGlobal: number,
-  performance: WalletCopyPerformance,
-): number {
-  const qualityQualified = walletQualityScore != null && walletQualityScore >= minWalletGlobal;
-  const copyQualified = performance.count >= 3 && performance.winRate >= 0.4 && performance.avgPnl > 0;
-  return qualityQualified || copyQualified ? 20 : 5;
-}
-
-/**
- * Whether the minWalletGlobal gate is bypassed for this segment.
- * sports_mainline has proven edge independent of leaderboard heuristics;
- * all other segments still require the global score floor.
- */
-export function bypassesGlobalScoreGate(segment: MarketSegment): boolean {
-  return segment === "sports_mainline";
 }
 
 /**
@@ -483,30 +383,33 @@ export function scoreTrade(
   return { score: Math.round(mkt.score), decision: "paper_copy", reasons: mkt.reasons };
 }
 
-/** Track record for one (wallet, segment) pair, used by the copy-performance filter. */
+/** Track record for one (wallet, side) pair, used by the copy-performance filter. */
 export interface WalletCopyRecord {
-  segment: string;        // market segment (sports_mainline, tennis, etc.)
-  count: number;          // resolved wallet-copy trades in this segment
-  avgPnl: number;         // average realized PnL per resolved trade
-  winRate: number;        // fraction of resolved trades with pnl > 0
+  side: string;
+  count: number;          // copies of this (wallet, side)
+  avgPnl: number;         // average unrealized PnL per copy
+  winRate: number;        // fraction of copies with pnl > 0
+  totalPnl: number;       // wallet's TOTAL copy PnL across all sides (catastrophic-loss stop)
   openCount: number;      // wallet's open copy count (diversification cap)
 }
 
 /**
  * Pure decision for the copy-performance filter. Returns a skip reason if this
- * (wallet, segment) should NOT be copied, else null. Kept pure so the job's learning
- * loop is unit-testable. Two guards:
- *  1. diversification cap — don't pile into one wallet (alternate across many);
- *  2. per-segment performance — drop segments that lose on average after enough samples.
- * No global wallet-loss gate: per-segment filters already remove bad segments after
- * minWalletCopyCount results, without cross-segment contamination.
+ * (wallet, side) should NOT be copied, else null. Kept pure so the job's learning
+ * loop is unit-testable. Three guards:
+ *  1. catastrophic-loss stop — a wallet that has lost too much total is dropped entirely;
+ *  2. diversification cap — don't pile into one wallet (alternate across many);
+ *  3. per-(wallet, side) performance — drop sides that lose on average (BUY loses,
+ *     SELL wins, so a wallet's BUY copies get dropped while SELL keeps running).
  */
 export function walletCopySkipReason(rec: WalletCopyRecord, rules = DEFAULT_RULES): string | null {
+  if (rec.totalPnl < rules.maxWalletLoss)
+    return `wallet total copy PnL $${rec.totalPnl.toFixed(2)} < ${rules.maxWalletLoss} (catastrophic-loss stop)`;
   if (rec.openCount >= rules.maxCopiesPerWallet)
     return `wallet already has ${rec.openCount} open copies (diversification cap)`;
   if (rec.count >= rules.minWalletCopyCount && rec.winRate < rules.minWalletCopyWinRate)
-    return `${rec.segment} winRate ${(rec.winRate * 100).toFixed(0)}% < ${(rules.minWalletCopyWinRate * 100).toFixed(0)}% over ${rec.count} resolved`;
+    return `${rec.side} copies winRate ${(rec.winRate * 100).toFixed(0)}% < ${(rules.minWalletCopyWinRate * 100).toFixed(0)}% over ${rec.count} copies`;
   if (rec.count >= rules.minWalletCopyCount && rec.avgPnl < 0)
-    return `${rec.segment} avg PnL $${rec.avgPnl.toFixed(2)} < 0 over ${rec.count} resolved`;
+    return `${rec.side} copies avg PnL $${rec.avgPnl.toFixed(2)} < 0 over ${rec.count} copies`;
   return null;
 }
