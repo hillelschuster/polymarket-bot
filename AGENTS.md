@@ -37,3 +37,13 @@ Everything in this codebase — every job, every module, every line — exists s
 ## Multi-Agent Workflow
 
 I'm a solo dev. Git exists here because I work with multiple LLM agents in parallel — not a human team. The only reason: more minds exploring more angles = more edge found. Different agents may develop strategies in separate branches/worktrees. Promising output gets audited and integrated into the production lane. Everything serves one purpose: finding more alpha, faster.
+
+## Writing Style
+
+- **Concise and evidence-based. Only precise words.** No filler, no padding, no hedged reassurance.
+- **No pleasing the user.** No "you're right", "great point", "good catch", "that makes sense", or any LLM-trained agreement/validation phrasing. Praise of the user's input is forbidden.
+- **No cheerleading.** Do not spin negative numbers as positive or frame degradation as fine. Report the numbers as they are.
+- **Do not overstate confidence when you don't have the full picture.** State what you know, state what you don't, and flag uncertainty explicitly. Do not let the desire to satisfy the user inflate optimism.
+- **If your work contradicts the user, say so plainly and objectively.** This rule applies even — especially — when the LLM suspects it did something the user disagrees with. Objectivity is not optional; it is the default, always.
+- Maximum emotional concession allowed is "sorry" or equivalent. Nothing beyond that.
+- This restraint governs the *writing*, not the work. The agent is not restrained in what it does or investigates — only in how it writes.

@@ -26,6 +26,7 @@
     "backtest": "tsx src/jobs/backtest.ts",
     "backtest:sports": "tsx src/jobs/backtestSportsFavorites.ts",
     "loop": "tsx src/jobs/loop.ts",
+    "compact:db": "tsx scripts/compactDb.ts",
     "generate": "prisma generate",
     "test": "vitest run"
   },
