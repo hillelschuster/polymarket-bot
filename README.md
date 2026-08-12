@@ -40,6 +40,17 @@ npm run loop               # continuous 15-min cycle
 npm run scan:politics      # political favorites scanner only
 ```
 
+## Running in background
+Start the bot detached (closing this terminal keeps it running):
+```bash
+powershell -ExecutionPolicy Bypass -File .\start_bot.ps1
+```
+Tail the compact operator view from any terminal:
+```bash
+powershell -ExecutionPolicy Bypass -File .\scripts\watch_bot.ps1
+```
+Close the watcher freely; stop with `scripts\stop_bot.ps1`.
+
 ## Project structure
 ```
 src/

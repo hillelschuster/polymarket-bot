@@ -15,6 +15,19 @@ try {
     Write-Host ("WARN: cannot open log '" + $logPath + "': " + $_.Exception.Message) -ForegroundColor Yellow
 }
 
+# Second append-only writer for the compact operator view (botloop-view.log).
+# Mirrors exactly what the compact console prints (nothing suppressed there is
+# written here). Same tolerance as above: a failure disables the view writer and
+# never breaks the raw botloop.log capture or the bot loop.
+$viewPath = Join-Path $PSScriptRoot 'botloop-view.log'
+$view = $null
+try {
+    $view = New-Object System.IO.StreamWriter($viewPath, $true, (New-Object System.Text.UTF8Encoding($false)))
+    $view.AutoFlush = $true
+} catch {
+    Write-Host ("WARN: cannot open view log '" + $viewPath + "': " + $_.Exception.Message) -ForegroundColor Yellow
+}
+
 # ---------------------------------------------------------------------------
 # Console formatter. Raw lines are ALWAYS written to botloop.log unchanged;
 # this only decides what the console mirror prints. State: a buffered line
@@ -178,6 +191,7 @@ function ConvertTo-CompactLine {
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 if ($env:PS_COMPACT_TEST) {
     if ($sw) { $sw.Close() }
+    if ($view) { $view.Close() }
 } else {
     $lastBlank = $false   # collapse runs of blank lines in the console mirror
     & npx tsx src/jobs/loop.ts 2>&1 | ForEach-Object {
@@ -186,9 +200,11 @@ if ($env:PS_COMPACT_TEST) {
         foreach ($o in $out) {
             if ($o -eq '' -and $lastBlank) { continue }
             $lastBlank = ($o -eq '')
+            if ($script:view) { try { $script:view.WriteLine($o) } catch { $script:view = $null } }
             [Console]::WriteLine($o)
         }
     }
     if ($sw) { $sw.Close() }
+    if ($view) { $view.Close() }
     exit $LASTEXITCODE
 }
