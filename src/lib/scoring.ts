@@ -101,7 +101,7 @@ export const DEFAULT_RULES: RuleSetValues = {
   maxEntryGap: 0.05,               // skip if |copyPrice - walletFill| > 5% (post-fill entry leak)
   maxWalletLoss: -3,                // stop copying a wallet after it loses $3 total (prevents blow-ups like -$17.96)
   maxCopiesPerWallet: 8,            // cap open copies per wallet so we diversify across many good wallets
-  stopLossPct: 0.5,                 // close open paper trades when unrealized loss > 50% of size (cuts catastrophic bleed)
+  stopLossPct: 1.0,                 // hold to official resolution; no valid binary position reaches lossFrac < -1.0
   // Market-variable equation (wallet-independent primary selector)
   minFavoritePrice: 0.60,           // only bet favorites (backtest sweep: 0.60 → 44% win +$7.81; [0.60,0.65) bucket profitable)
   minMarketLiquidity: 10_000,       // WIDENED from 89K: small sample (45 trades) may be overfit
