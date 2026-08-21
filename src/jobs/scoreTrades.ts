@@ -198,8 +198,8 @@ export async function runScoreTrades(): Promise<void> {
     const midpoint = priceOf(ot.slug, ot.tokenId) ?? ot.detectedPrice ?? 0.5;
     const detectedPrice = ot.detectedPrice ?? midpoint;
     const priceMovementSinceEntry = midpoint - detectedPrice;
-    const spread = ot.marketSpread ?? m?.spread ?? 0.03;
-    const liquidity = ot.marketLiquidity ?? m?.liquidity ?? 10_000;
+    const spread = m?.spread ?? ot.marketSpread ?? 0.03;
+    const liquidity = m?.liquidity ?? ot.marketLiquidity ?? 10_000;
     const volume = m?.volume ?? 0;
 
     // Sports timing: use slug-parsed hours, reject unknown
