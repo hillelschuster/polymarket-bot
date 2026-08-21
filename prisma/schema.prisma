@@ -232,7 +232,7 @@ model LiveOrder {
   quoteAllInPrice   Float?
   quoteFee          Float?
   limitPrice        Float?
-  status            String           @default("submitted") // blocked_cap | submitted | open | not_filled | unknown | resolved
+  status            String           @default("submitted") // blocked_cap | blocked_balance | submitted | open | not_filled | unknown | resolved
   orderState        String?
   orderId           String?
   transactionHash   String?

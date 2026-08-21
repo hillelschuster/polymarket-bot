@@ -6,6 +6,8 @@
 import { prisma } from "../lib/db.js";
 import { scoreTradeByMarket, DEFAULT_RULES, walletCopySkipReason, categoryFromSlug, getFavoriteGate, type RuleSetValues } from "../lib/scoring.js";
 import { createPaperTrade } from "../lib/paper.js";
+import { config, realTradingEnabled } from "../lib/config.js";
+import { liveCashBudgetForPaper } from "../lib/liveLimits.js";
 import { getMarketBySlug, getExecutableBuyQuote } from "../adapters/polymarket.js";
 
 // --- Constants ---
@@ -429,6 +431,27 @@ export async function runScoreTrades(): Promise<void> {
         openedAt: new Date(pt.openedAt),
       },
     });
+
+    // Live execution is opt-in and uses the exact approved executable quote.
+    if (realTradingEnabled) {
+      const liveCashBudget = liveCashBudgetForPaper(cashBudget, config.LIVE_MAX_POSITION_USD);
+      const liveQuote = await getExecutableBuyQuote(ot.tokenId!, liveCashBudget);
+      if (!liveQuote) {
+        console.log(`  LIVE SKIP: no executable quote at scaled $${liveCashBudget.toFixed(2)}`);
+      } else {
+        const { executeWalletCopyOrder } = await import("../lib/liveExecution.js");
+        await executeWalletCopyOrder({
+          tokenId: ot.tokenId!,
+          cashBudget: liveQuote.cashCost,
+          allInPrice: liveQuote.allInPrice,
+          shares: liveQuote.shares,
+          decisionJournalId: dj.id,
+          walletAddress: ot.walletAddress,
+          marketId: ot.marketId,
+          slug: ot.slug ?? null,
+        });
+      }
+    }
 
     existingCopies.add(dedupKey);
     copied++;

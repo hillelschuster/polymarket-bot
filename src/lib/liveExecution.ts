@@ -1,8 +1,15 @@
 // Minimal live execution for Lane A wallet-copy trades.
 // ONE path: same approved quote -> exact-share FOK -> hold to resolution.
 import { prisma } from "./db.js";
-import { executeFokBuy } from "../adapters/execution.js";
+import { getMarketBySlug } from "../adapters/polymarket.js";
 import { assertLiveTradingConfigured, config } from "./config.js";
+import { liveLimitReason } from "./liveLimits.js";
+
+function atomicUsd(value: string | number): number {
+  if (String(value).toLowerCase() === "unlimited") return Infinity;
+  const raw = Number(value);
+  return Number.isFinite(raw) ? raw / 1_000_000 : NaN;
+}
 
 /**
  * Execute ONE FOK buy for a wallet-copy signal.
@@ -35,16 +42,25 @@ export async function executeWalletCopyOrder(params: {
     );
   }
 
-  const openExposure = await prisma.liveOrder.aggregate({
+  const openOrders = await prisma.liveOrder.findMany({
     where: { status: "open" },
-    _sum: { quoteCashCost: true },
+    select: { quoteCashCost: true, cashBudget: true },
   });
-  if ((openExposure._sum.quoteCashCost ?? 0) + cashBudget > config.LIVE_MAX_TOTAL_EXPOSURE_USD) {
+  const limitReason = liveLimitReason({
+    openPositions: openOrders.length,
+    exposureUsd: openOrders.reduce((sum, order) => sum + (order.quoteCashCost ?? order.cashBudget ?? 0), 0),
+    cashBudget,
+  }, {
+    maxOpenPositions: config.LIVE_MAX_OPEN_POSITIONS,
+    maxPositionUsd: config.LIVE_MAX_POSITION_USD,
+    maxExposureUsd: config.LIVE_MAX_TOTAL_EXPOSURE_USD,
+  });
+  if (limitReason) {
     await prisma.liveOrder.create({
       data: {
         decisionJournalId, walletAddress, marketId, slug, tokenId, side: "BUY",
         cashBudget, paperAllInPrice: allInPrice, shares, status: "blocked_cap",
-        error: `exposure cap $${config.LIVE_MAX_TOTAL_EXPOSURE_USD} reached`,
+        error: limitReason,
       },
     }).catch((err: unknown) => {
       if ((err as { code?: string }).code !== "P2002") throw err;
@@ -52,7 +68,43 @@ export async function executeWalletCopyOrder(params: {
     return;
   }
 
-  // Persist intent before any network request. @unique prevents restart duplicates.
+  // Refresh the CLOB cache and fail closed if the actual collateral cannot fund this order.
+  const [{ AssetType }, { executeFokBuy, getTradingClient }] = await Promise.all([
+    import("@polymarket/clob-client-v2"),
+    import("../adapters/execution.js"),
+  ]);
+  const trading = getTradingClient();
+  try {
+    await trading.updateBalanceAllowance({ asset_type: AssetType.COLLATERAL });
+    const collateral = await trading.getBalanceAllowance({ asset_type: AssetType.COLLATERAL });
+    const balanceUsd = atomicUsd(collateral.balance);
+    const allowanceUsd = Math.max(...Object.values(collateral.allowances ?? {}).map(atomicUsd), 0);
+    if (!Number.isFinite(balanceUsd) || balanceUsd + 0.005 < cashBudget || allowanceUsd + 0.005 < cashBudget) {
+      await prisma.liveOrder.create({
+        data: {
+          decisionJournalId, walletAddress, marketId, slug, tokenId, side: "BUY",
+          cashBudget, paperAllInPrice: allInPrice, shares, status: "blocked_balance",
+          error: `collateral preflight failed (balance=$${balanceUsd}, allowance=$${allowanceUsd})`,
+        },
+      }).catch((err: unknown) => {
+        if ((err as { code?: string }).code !== "P2002") throw err;
+      });
+      return;
+    }
+  } catch (err) {
+    await prisma.liveOrder.create({
+      data: {
+        decisionJournalId, walletAddress, marketId, slug, tokenId, side: "BUY",
+        cashBudget, paperAllInPrice: allInPrice, shares, status: "blocked_balance",
+        error: `collateral preflight error: ${(err as Error).message}`,
+      },
+    }).catch((createErr: unknown) => {
+      if ((createErr as { code?: string }).code !== "P2002") throw createErr;
+    });
+    return;
+  }
+
+  // Persist intent before the FOK network request. @unique prevents restart duplicates.
   let lo;
   try {
     lo = await prisma.liveOrder.create({
@@ -94,4 +146,41 @@ export async function executeWalletCopyOrder(params: {
     },
   });
   console.log(`LiveOrder ${lo.id}: ${status}${result.error ? ` — ${result.error}` : ""}`);
+}
+
+/** Mark held wallet-copy positions resolved once Gamma reports a binary payout. */
+export async function reconcileLiveOrders(): Promise<void> {
+  const openOrders = await prisma.liveOrder.findMany({
+    where: { status: "open" },
+    select: {
+      id: true,
+      slug: true,
+      tokenId: true,
+      shares: true,
+      quoteCashCost: true,
+    },
+  });
+
+  for (const order of openOrders) {
+    if (!order.slug || !order.tokenId || order.shares == null || order.quoteCashCost == null) continue;
+    try {
+      const market = await getMarketBySlug(order.slug);
+      if (!market?.closed) continue;
+      const tokenIndex = market.clobTokenIds?.findIndex((id) => id === order.tokenId) ?? -1;
+      const finalPrice = tokenIndex >= 0 ? Number(market.outcomePrices?.[tokenIndex]) : NaN;
+      if (finalPrice !== 0 && finalPrice !== 1) continue;
+
+      await prisma.liveOrder.update({
+        where: { id: order.id },
+        data: {
+          status: "resolved",
+          resolvedAt: new Date(),
+          realizedPnl: order.shares * finalPrice - order.quoteCashCost,
+        },
+      });
+      console.log(`LiveOrder ${order.id}: resolved at ${finalPrice}`);
+    } catch (err) {
+      console.warn(`LiveOrder ${order.id}: reconciliation skipped — ${(err as Error).message}`);
+    }
+  }
 }

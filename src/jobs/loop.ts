@@ -16,6 +16,7 @@
 
 import { runFastPath, runSlowPath } from "./runAll.js";
 import { logStartupContext } from "../lib/runtime.js";
+import { acquireProcessLock } from "../lib/processLock.js";
 
 // Safety net: never let an unhandled rejection/exception kill the overnight loop.
 process.on("uncaughtException", (e) => console.error("uncaughtException:", (e as Error).message));
@@ -71,4 +72,15 @@ async function main() {
   console.log("loop finished");
 }
 
-if (require.main === module) main().catch(console.error);
+if (require.main === module) {
+  try {
+    acquireProcessLock();
+    main().catch((error) => {
+      console.error(error);
+      process.exitCode = 1;
+    });
+  } catch (error) {
+    console.error(error);
+    process.exitCode = 1;
+  }
+}

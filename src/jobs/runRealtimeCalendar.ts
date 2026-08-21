@@ -29,6 +29,7 @@ import {
   resolveLiveMarket,
   updateLiveBasket,
 } from "../lib/liveCalendarStore.js";
+import { acquireProcessLock } from "../lib/processLock.js";
 
 const MARKET_WS = "wss://ws-subscriptions-clob.polymarket.com/ws/market";
 const MIN_LIQUIDITY = 5_000;
@@ -66,6 +67,7 @@ let reconcileTimer: ReturnType<typeof setInterval> | null = null;
 let resolutionTimer: ReturnType<typeof setInterval> | null = null;
 let stopped = false;
 let halted = false;
+let releaseProcessLock: (() => void) | undefined;
 
 function daysUntil(endDate: string): number {
   return (new Date(endDate).getTime() - Date.now()) / 86_400_000;
@@ -440,18 +442,27 @@ async function shutdown(): Promise<void> {
   if (resolutionTimer) clearInterval(resolutionTimer);
   ws?.close();
   await prisma.$disconnect();
+  releaseProcessLock?.();
+  releaseProcessLock = undefined;
 }
 
 export async function runRealtimeCalendar(): Promise<void> {
-  await initLiveCalendarStore();
-  if (realTradingEnabled) assertLiveTradingConfigured();
-  halted = (await getExecutionRisk()).incidents > 0;
-  console.log(`realtimeCalendar: mode=${realTradingEnabled ? "LIVE" : "OBSERVE"}${halted ? " HALTED" : ""}`);
+  releaseProcessLock = acquireProcessLock();
+  try {
+    await initLiveCalendarStore();
+    if (realTradingEnabled) assertLiveTradingConfigured();
+    halted = (await getExecutionRisk()).incidents > 0;
+    console.log(`realtimeCalendar: mode=${realTradingEnabled ? "LIVE" : "OBSERVE"}${halted ? " HALTED" : ""}`);
 
-  await discoverPairs();
-  discoveryTimer = setInterval(() => void discoverPairs().catch((error) => console.error("realtimeCalendar discovery:", error)), DISCOVERY_MS);
-  reconcileTimer = setInterval(() => void reconcilePending().catch((error) => console.error("realtimeCalendar reconcile:", error)), RECONCILE_MS);
-  resolutionTimer = setInterval(() => void reconcileResolutions().catch((error) => console.error("realtimeCalendar resolution:", error)), RESOLUTION_MS);
+    await discoverPairs();
+    discoveryTimer = setInterval(() => void discoverPairs().catch((error) => console.error("realtimeCalendar discovery:", error)), DISCOVERY_MS);
+    reconcileTimer = setInterval(() => void reconcilePending().catch((error) => console.error("realtimeCalendar reconcile:", error)), RECONCILE_MS);
+    resolutionTimer = setInterval(() => void reconcileResolutions().catch((error) => console.error("realtimeCalendar resolution:", error)), RESOLUTION_MS);
+  } catch (error) {
+    releaseProcessLock?.();
+    releaseProcessLock = undefined;
+    throw error;
+  }
 }
 
 process.once("SIGINT", () => void shutdown().finally(() => process.exit(0)));

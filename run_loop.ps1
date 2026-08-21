@@ -194,7 +194,7 @@ if ($env:PS_COMPACT_TEST) {
     if ($view) { $view.Close() }
 } else {
     $lastBlank = $false   # collapse runs of blank lines in the console mirror
-    & npx tsx src/jobs/loop.ts 2>&1 | ForEach-Object {
+    & node --env-file=.env --import=tsx src/jobs/loop.ts 2>&1 | ForEach-Object {
         if ($sw) { $sw.WriteLine($_) }
         try { $out = ConvertTo-CompactLine $_ } catch { $out = @($_) }
         foreach ($o in $out) {

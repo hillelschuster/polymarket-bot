@@ -18,6 +18,7 @@ import { runPaperUpdatePnl } from "./paperUpdatePnl.js";
 import { runReviewOutcomes } from "./reviewOutcomes.js";
 import { runUpdateRules } from "./updateRules.js";
 import { runReportDaily } from "./reportDaily.js";
+import { reconcileLiveOrders } from "../lib/liveExecution.js";
 import { prisma } from "../lib/db.js";
 import { summarizePnl } from "../lib/reporting.js";
 
@@ -33,6 +34,7 @@ const fastSteps: [string, () => Promise<void>, boolean][] = [
   ["monitor:trades", runMonitorTrades, true],
   ["score:trades", runScoreTrades, false],
   ["paper:update-pnl", runPaperUpdatePnl, false],
+  ["reconcile:live", reconcileLiveOrders, false],
   ["review:outcomes", runReviewOutcomes, false],
 ];
 
