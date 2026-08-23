@@ -35,8 +35,11 @@ if printf '%s\n' "$CHANGED" | grep -qx "$UNIT_SRC"; then
   systemctl daemon-reload
 fi
 
-if printf '%s\n' "$CHANGED" | grep -Evq '^(\.gitignore|README.*|docs/.*|.*\.md)$'; then
+if printf '%s\n' "$CHANGED" | grep -qxE '(package\.json|package-lock\.json)'; then
   npm install --prefix "$REPO" --no-audit --no-fund 2>&1 | tail -1
+fi
+
+if printf '%s\n' "$CHANGED" | grep -Evq '^(\.gitignore|README.*|docs/.*|.*\.md)$'; then
   systemctl restart "$SERVICE"
 fi
 

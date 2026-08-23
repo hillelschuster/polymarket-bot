@@ -8,8 +8,8 @@ Type=simple
 User=ubuntu
 WorkingDirectory=/opt/polymarket-bot
 Environment=NODE_ENV=production
-Environment=DATABASE_URL=file:/var/lib/trading-bots/polymarket-bot/polymarket-bot.sqlite
-ExecStart=/usr/bin/node --env-file=/opt/polymarket-bot/.env --import=tsx src/jobs/loop.ts
+EnvironmentFile=/var/lib/trading-bots/polymarket-bot/.env
+ExecStart=/usr/bin/node --import=tsx src/jobs/loop.ts
 Restart=always
 RestartSec=15
 KillMode=control-group
