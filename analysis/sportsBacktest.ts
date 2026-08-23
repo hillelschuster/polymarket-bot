@@ -1,0 +1,246 @@
+export interface HistoricalTrade {
+  asset: string;
+  side: string;
+  size: number;
+  price: number;
+  timestamp: number;
+}
+
+export interface FavoriteAtEntry {
+  tokenId: string;
+  outcomeIndex: number;
+  referencePrice: number;
+  tokenPrices: [number, number];
+  referenceTimestamp: number;
+}
+
+export interface SimulatedFill {
+  shares: number;
+  cashSpent: number;
+  feePaid: number;
+  averagePrice: number;
+  allInPrice: number;
+  fillRatio: number;
+  fillSeconds: number;
+  tradeCount: number;
+}
+
+export interface BacktestRow {
+  sport: string;
+  marketId: string;
+  conditionId: string;
+  slug: string;
+  gameId: string | null;
+  eventStartTime: string;
+  favoriteOutcome: string;
+  favoriteTokenId: string;
+  referencePrice: number;
+  averageFillPrice: number;
+  allInPrice: number;
+  feePaid: number;
+  shares: number;
+  cashSpent: number;
+  fillRatio: number;
+  fillSeconds: number;
+  won: boolean;
+  pnl: number;
+  roi: number;
+}
+
+export interface BacktestSummary {
+  n: number;
+  independentDays: number;
+  wins: number;
+  winRate: number;
+  cashSpent: number;
+  pnl: number;
+  roi: number;
+  averageTradeRoi: number;
+  ci95Low: number;
+  ci95High: number;
+}
+
+export function parseStringList(value: unknown): string[] {
+  if (Array.isArray(value)) return value.map(String);
+  if (typeof value !== "string") return [];
+  try {
+    const parsed = JSON.parse(value);
+    return Array.isArray(parsed) ? parsed.map(String) : [];
+  } catch {
+    return value.split(",").map((x) => x.trim()).filter(Boolean);
+  }
+}
+
+/** Gamma feeSchedule.rate is decimal; older fields may be basis points. */
+export function normalizeFeeRate(value: unknown, fallback = 0.10): number {
+  const n = Number(value);
+  if (!Number.isFinite(n) || n < 0) return fallback;
+  return n > 1 ? n / 10_000 : n;
+}
+
+export function takerFeePerShare(price: number, feeRate: number): number {
+  return price * (1 - price) * feeRate;
+}
+
+/** Uses the freshest market print at or before entry; the opposite token is complementary. */
+export function favoriteAtEntry(
+  trades: HistoricalTrade[],
+  tokenIds: string[],
+  entryTs: number,
+  maxPriceAgeSeconds: number,
+): FavoriteAtEntry | null {
+  if (tokenIds.length !== 2) return null;
+  const floor = entryTs - maxPriceAgeSeconds;
+  let latest: HistoricalTrade | null = null;
+  for (const trade of trades) {
+    if (!tokenIds.includes(trade.asset)) continue;
+    if (trade.timestamp < floor || trade.timestamp > entryTs) continue;
+    if (!(trade.price > 0 && trade.price < 1)) continue;
+    if (!latest || trade.timestamp > latest.timestamp) latest = trade;
+  }
+  if (!latest) return null;
+  const assetIndex = tokenIds.indexOf(latest.asset);
+  if (assetIndex < 0) return null;
+  const tokenPrices: [number, number] = assetIndex === 0
+    ? [latest.price, 1 - latest.price]
+    : [1 - latest.price, latest.price];
+  const outcomeIndex = tokenPrices[0] >= tokenPrices[1] ? 0 : 1;
+  return {
+    tokenId: tokenIds[outcomeIndex],
+    outcomeIndex,
+    referencePrice: tokenPrices[outcomeIndex],
+    tokenPrices,
+    referenceTimestamp: latest.timestamp,
+  };
+}
+
+/**
+ * Conservative historical execution proxy:
+ * consume subsequent taker BUY prints, add one tick to every observed price,
+ * and require the caller to enforce a minimum fill ratio.
+ */
+export function simulateTakerBuy(
+  trades: HistoricalTrade[],
+  tokenId: string,
+  entryTs: number,
+  fillWindowSeconds: number,
+  cashBudget: number,
+  feeRate: number,
+  tickSize: number,
+): SimulatedFill | null {
+  if (!(cashBudget > 0) || !(tickSize > 0)) return null;
+  const candidates = trades
+    .filter((t) =>
+      t.asset === tokenId &&
+      t.side.toUpperCase() === "BUY" &&
+      t.timestamp >= entryTs &&
+      t.timestamp <= entryTs + fillWindowSeconds &&
+      t.size > 0 &&
+      t.price > 0 &&
+      t.price < 1,
+    )
+    .sort((a, b) => a.timestamp - b.timestamp);
+
+  let remainingCash = cashBudget;
+  let shares = 0;
+  let notional = 0;
+  let feePaid = 0;
+  let lastFillTs = entryTs;
+  let tradeCount = 0;
+
+  for (const trade of candidates) {
+    const executionPrice = Math.min(0.9999, trade.price + tickSize);
+    const feePerShare = takerFeePerShare(executionPrice, feeRate);
+    const allInPerShare = executionPrice + feePerShare;
+    const take = Math.min(trade.size, remainingCash / allInPerShare);
+    if (!(take > 0)) continue;
+    shares += take;
+    notional += take * executionPrice;
+    feePaid += take * feePerShare;
+    remainingCash -= take * allInPerShare;
+    lastFillTs = trade.timestamp;
+    tradeCount++;
+    if (remainingCash <= 0.001) break;
+  }
+
+  if (!(shares > 0)) return null;
+  const cashSpent = notional + feePaid;
+  return {
+    shares,
+    cashSpent,
+    feePaid,
+    averagePrice: notional / shares,
+    allInPrice: cashSpent / shares,
+    fillRatio: cashSpent / cashBudget,
+    fillSeconds: Math.max(0, lastFillTs - entryTs),
+    tradeCount,
+  };
+}
+
+function mean(values: number[]): number {
+  return values.length ? values.reduce((a, b) => a + b, 0) / values.length : 0;
+}
+
+function seededRandom(seed: number): () => number {
+  let state = seed >>> 0;
+  return () => {
+    state ^= state << 13;
+    state ^= state >>> 17;
+    state ^= state << 5;
+    return (state >>> 0) / 4_294_967_296;
+  };
+}
+
+/** Day-block bootstrap preserves same-day correlation across sports bets. */
+export function bootstrapDayRoiCI(rows: BacktestRow[], iterations = 5_000, seed = 0x5eed): [number, number] {
+  if (!rows.length) return [0, 0];
+  const groups = new Map<string, BacktestRow[]>();
+  for (const row of rows) {
+    const day = row.eventStartTime.slice(0, 10);
+    const group = groups.get(day) ?? [];
+    group.push(row);
+    groups.set(day, group);
+  }
+  const days = [...groups.values()];
+  if (days.length === 1) {
+    const cash = rows.reduce((sum, row) => sum + row.cashSpent, 0);
+    const pnl = rows.reduce((sum, row) => sum + row.pnl, 0);
+    const roi = cash ? pnl / cash : 0;
+    return [roi, roi];
+  }
+  const random = seededRandom(seed);
+  const samples: number[] = [];
+  for (let i = 0; i < iterations; i++) {
+    let cash = 0;
+    let pnl = 0;
+    for (let j = 0; j < days.length; j++) {
+      const group = days[Math.floor(random() * days.length)];
+      for (const row of group) {
+        cash += row.cashSpent;
+        pnl += row.pnl;
+      }
+    }
+    samples.push(cash ? pnl / cash : 0);
+  }
+  samples.sort((a, b) => a - b);
+  return [samples[Math.floor(iterations * 0.025)], samples[Math.floor(iterations * 0.975)]];
+}
+
+export function summarizeBacktest(rows: BacktestRow[]): BacktestSummary {
+  const cashSpent = rows.reduce((sum, row) => sum + row.cashSpent, 0);
+  const pnl = rows.reduce((sum, row) => sum + row.pnl, 0);
+  const [ci95Low, ci95High] = bootstrapDayRoiCI(rows);
+  const wins = rows.filter((row) => row.won).length;
+  return {
+    n: rows.length,
+    independentDays: new Set(rows.map((row) => row.eventStartTime.slice(0, 10))).size,
+    wins,
+    winRate: rows.length ? wins / rows.length : 0,
+    cashSpent,
+    pnl,
+    roi: cashSpent ? pnl / cashSpent : 0,
+    averageTradeRoi: mean(rows.map((row) => row.roi)),
+    ci95Low,
+    ci95High,
+  };
+}
