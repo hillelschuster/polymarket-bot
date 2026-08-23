@@ -1,0 +1,44 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+REPO=/opt/polymarket-bot
+SERVICE=polymarket-bot.service
+UNIT_SRC=deploy/polymarket-bot.service
+
+[ "$(runuser -u ubuntu -- git -C "$REPO" branch --show-current)" = "main" ] || {
+  echo "ABORT: production is not on main"
+  exit 1
+}
+
+[ -z "$(runuser -u ubuntu -- git -C "$REPO" status --porcelain --untracked-files=no)" ] || {
+  echo "ABORT: production has local tracked changes"
+  exit 1
+}
+
+BEFORE=$(runuser -u ubuntu -- git -C "$REPO" rev-parse HEAD)
+
+runuser -u ubuntu -- git -C "$REPO" pull --ff-only origin main
+
+AFTER=$(runuser -u ubuntu -- git -C "$REPO" rev-parse HEAD)
+
+if [ "$BEFORE" = "$AFTER" ]; then
+  echo "Already current: $AFTER"
+  systemctl is-active "$SERVICE"
+  exit 0
+fi
+
+CHANGED=$(runuser -u ubuntu -- git -C "$REPO" diff --name-only "$BEFORE" "$AFTER")
+printf '%s\n' "$CHANGED"
+
+if printf '%s\n' "$CHANGED" | grep -qx "$UNIT_SRC"; then
+  install -m 0644 "$REPO/$UNIT_SRC" /etc/systemd/system/polymarket-bot.service
+  systemctl daemon-reload
+fi
+
+if printf '%s\n' "$CHANGED" | grep -Evq '^(\.gitignore|README.*|docs/.*|.*\.md)$'; then
+  npm install --prefix "$REPO" --no-audit --no-fund 2>&1 | tail -1
+  systemctl restart "$SERVICE"
+fi
+
+systemctl is-active --quiet "$SERVICE"
+echo "DEPLOYED OK: $AFTER"

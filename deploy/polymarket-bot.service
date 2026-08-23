@@ -1,0 +1,20 @@
+[Unit]
+Description=Polymarket dry-mode trading bot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/opt/polymarket-bot
+Environment=NODE_ENV=production
+Environment=DATABASE_URL=file:/var/lib/trading-bots/polymarket-bot/polymarket-bot.sqlite
+ExecStart=/usr/bin/node --env-file=/opt/polymarket-bot/.env --import=tsx src/jobs/loop.ts
+Restart=always
+RestartSec=15
+KillMode=control-group
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
