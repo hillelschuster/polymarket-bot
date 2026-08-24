@@ -1,5 +1,6 @@
 // Electoral-political favorites. Paper entries use executable CLOB depth + taker fees.
 import { prisma } from "../lib/db.js";
+import { realTradingEnabled } from "../lib/config.js";
 import {
   getActiveMarkets,
   getOrderBook,
@@ -189,6 +190,21 @@ export async function runScanPoliticalFavorites(): Promise<ScanResult> {
       },
     });
     await prisma.strategySignal.update({ where: { id: signal.id }, data: { paperTradeId: pt.id } });
+    // ponytail: live execution path for political favorites, see tryPoliticalLiveOrder
+    try {
+      await tryPoliticalLiveOrder({
+        paperTradeId: pt.id,
+        buy,
+        tokenId,
+        marketId: m.id,
+        slug: m.slug,
+        outcome,
+        reasons,
+        realTradingEnabled,
+      });
+    } catch (err) {
+      console.warn("Political live order failed (paper preserved): " + (err instanceof Error ? err.message : String(err)));
+    }
 
     result.signals++;
     console.log(`  ✓ ${m.question?.slice(0, 60)} → BUY ${outcome} all-in ${buy.allInPrice.toFixed(4)} edge ${edgeEstimate.toFixed(4)}`);
@@ -198,5 +214,55 @@ export async function runScanPoliticalFavorites(): Promise<ScanResult> {
   if (result.reasons.size) console.log("  skip reasons:", Object.fromEntries(result.reasons));
   return result;
 }
+
+
+export interface PoliticalLiveOrderParams {
+  paperTradeId: string;
+  buy: { cashCost: number; allInPrice: number; shares: number; fee: number; spread: number | null; averageAsk: number; bestBid: number | null; bestAsk: number };
+  tokenId: string;
+  marketId: string;
+  slug: string | null;
+  outcome: string;
+  reasons: string[];
+}
+
+export async function tryPoliticalLiveOrder(params: PoliticalLiveOrderParams & { realTradingEnabled: boolean }): Promise<{ decisionJournalId: string } | null> {
+  if (!params.realTradingEnabled) return null;
+  const dj = await prisma.decisionJournal.create({
+    data: {
+      observedTradeId: null,
+      walletAddress: "STRATEGY:political_favorites",
+      marketId: params.marketId,
+      decision: "paper_copy",
+      executableAsk: params.buy.averageAsk,
+      allInPrice: params.buy.allInPrice,
+      fee: params.buy.fee,
+      spread: params.buy.spread ?? 0,
+      shares: params.buy.shares,
+      reasonsJson: JSON.stringify(params.reasons),
+    },
+  });
+  await prisma.paperTrade.update({
+    where: { id: params.paperTradeId },
+    data: { decisionJournalId: dj.id },
+  });
+  const { executeWalletCopyOrder } = await import("../lib/liveExecution.js");
+  try {
+    await executeWalletCopyOrder({
+      tokenId: params.tokenId,
+      cashBudget: params.buy.cashCost,
+      allInPrice: params.buy.allInPrice,
+      shares: params.buy.shares,
+      decisionJournalId: dj.id,
+      walletAddress: "STRATEGY:political_favorites",
+      marketId: params.marketId,
+      slug: params.slug,
+    });
+  } catch (err) {
+    console.warn("Political live order failed (paper preserved): " + (err instanceof Error ? err.message : String(err)));
+  }
+  return { decisionJournalId: dj.id };
+}
+
 
 if (require.main === module) runScanPoliticalFavorites().catch(console.error);

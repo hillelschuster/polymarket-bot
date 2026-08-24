@@ -1,0 +1,11 @@
+[Unit]
+Description=Polymarket bot — weekly archive + prune timer
+Requires=polymarket-archive.service
+
+[Timer]
+OnCalendar=Sun *-*-* 04:00:00 UTC
+Persistent=true
+Unit=polymarket-archive.service
+
+[Install]
+WantedBy=timers.target

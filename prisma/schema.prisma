@@ -95,7 +95,7 @@ model MarketSnapshot {
 
 model DecisionJournal {
   id                    String         @id @default(cuid())
-  observedTradeId       String         @unique
+  observedTradeId       String?         @unique
   walletAddress         String
   marketId              String
   decision              String // paper_copy | watchlist | skip

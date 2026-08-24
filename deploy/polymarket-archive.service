@@ -1,0 +1,20 @@
+[Unit]
+Description=Polymarket bot — weekly archive + prune
+Documentation=https://github.com/your-org/polymarket-bot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=ubuntu
+Group=ubuntu
+WorkingDirectory=/opt/polymarket-bot
+ExecStart=/opt/polymarket-bot/scripts/archive_history.py --prune
+Restart=no
+StandardOutput=journal
+StandardError=journal
+PrivateTmp=false
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target
