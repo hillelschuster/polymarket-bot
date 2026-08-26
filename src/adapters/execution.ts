@@ -171,11 +171,18 @@ export function prepareFokBuyOrder(input: {
   maxAllInPrice: number;
 }): PreparedFokBuy | null {
   if (!TICKS.has(String(input.book.tick_size))) return null;
-  const integerShares = Math.floor(input.shares);
+  const tickSize = Number(input.book.tick_size);
+  let multiple = 1;
+  if (tickSize === 0.0001) multiple = 100;
+  else if (tickSize === 0.001) multiple = 10;
+  else if (tickSize === 0.005) multiple = 2;
+  
+  const roundedShares = Math.floor(input.shares / multiple) * multiple;
   const minSize = Math.max(Number(input.book.min_order_size || 5), 5);
-  if (integerShares < minSize) return null;
-  const quote = quoteBuySharesExact(input.book, input.fee, integerShares);
-  const limitPrice = worstAskForShares(input.book, integerShares);
+  
+  if (roundedShares < minSize) return null;
+  const quote = quoteBuySharesExact(input.book, input.fee, roundedShares);
+  const limitPrice = worstAskForShares(input.book, roundedShares);
   if (!quote || limitPrice == null) return null;
   if (quote.cashCost > input.maxCashCost + 0.005) return null;
   if (quote.allInPrice > input.maxAllInPrice + 1e-8) return null;
@@ -184,7 +191,7 @@ export function prepareFokBuyOrder(input: {
     quote,
     leg: {
       tokenId: input.tokenId,
-      shares: integerShares,
+      shares: roundedShares,
       limitPrice,
       estimatedCashCost: Number(quote.cashCost.toFixed(2)),
       tickSize: input.book.tick_size,
