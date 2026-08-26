@@ -79,7 +79,7 @@ export async function executeWalletCopyOrder(params: {
     const collateral = await trading.getBalanceAllowance({ asset_type: AssetType.COLLATERAL });
     const balanceUsd = atomicUsd(collateral.balance);
     const allowances = Object.values(collateral.allowances ?? {}).map(atomicUsd);
-    const allowanceUsd = allowances.length > 0 ? Math.min(...allowances) : 0;
+    const allowanceUsd = allowances.length > 0 ? Math.max(...allowances) : 0;
     if (!Number.isFinite(balanceUsd) || balanceUsd + 0.005 < cashBudget || allowanceUsd + 0.005 < cashBudget) {
       await prisma.liveOrder.create({
         data: {
@@ -152,7 +152,7 @@ export async function executeWalletCopyOrder(params: {
 
 /** Mark held wallet-copy positions resolved once Gamma reports a binary payout, and reconcile stuck orders. */
 export async function reconcileLiveOrders(): Promise<void> {
-  // 1. Auto-unblock stale "unknown" or "submitted" orders older than 2 minutes without orderId
+  // 1. Reconcile stale "unknown" or "submitted" orders older than 2 minutes against CLOB
   try {
     const stuckOrders = await prisma.liveOrder.findMany({
       where: {
@@ -160,13 +160,79 @@ export async function reconcileLiveOrders(): Promise<void> {
         createdAt: { lt: new Date(Date.now() - 2 * 60 * 1000) },
       },
     });
-    for (const stuck of stuckOrders) {
-      if (!stuck.orderId) {
-        await prisma.liveOrder.update({
-          where: { id: stuck.id },
-          data: { status: "not_filled", error: "stale submission without orderId auto-unblocked" },
-        });
-        console.log(`LiveOrder ${stuck.id}: auto-unblocked stale ${stuck.status} -> not_filled`);
+    if (stuckOrders.length > 0) {
+      const { getTradingClient } = await import("../adapters/execution.js");
+      const trading = getTradingClient();
+
+      for (const stuck of stuckOrders) {
+        try {
+          if (stuck.orderId) {
+            // Case A: Query exchange for order status by orderId
+            const clobOrder = await trading.getOrder(stuck.orderId);
+            const matchedSize = Number(clobOrder.size_matched ?? 0);
+            const orderStatus = String(clobOrder.status ?? "").toUpperCase();
+
+            if (orderStatus === "MATCHED" || (matchedSize > 0 && matchedSize >= Number(clobOrder.original_size ?? 0))) {
+              await prisma.liveOrder.update({
+                where: { id: stuck.id },
+                data: {
+                  status: "open",
+                  orderState: "matched",
+                  shares: matchedSize || stuck.shares,
+                  filledAt: new Date(),
+                  error: null,
+                },
+              });
+              console.log(`LiveOrder ${stuck.id}: reconciled orderId ${stuck.orderId} -> open (${matchedSize} shares)`);
+            } else if (["CANCELLED", "CANCELED", "FAILED", "REJECTED", "UNMATCHED"].includes(orderStatus) && matchedSize === 0) {
+              await prisma.liveOrder.update({
+                where: { id: stuck.id },
+                data: {
+                  status: "not_filled",
+                  orderState: "failed",
+                  error: `FOK order ${orderStatus.toLowerCase()} on CLOB`,
+                },
+              });
+              console.log(`LiveOrder ${stuck.id}: reconciled orderId ${stuck.orderId} -> not_filled (${orderStatus})`);
+            }
+          } else if (stuck.tokenId) {
+            // Case B: Order has no orderId — verify against authenticated user trade history
+            const trades = await trading.getTrades({ asset_id: stuck.tokenId }).catch(() => []);
+            const windowStart = stuck.createdAt.getTime() - 10_000;
+            const windowEnd = stuck.createdAt.getTime() + 90_000;
+
+            const matched = (trades as Array<{ match_time?: string; timestamp?: string; status?: string; size?: string | number; taker_order_id?: string; transaction_hash?: string }>).filter((t) => {
+              const matchTs = new Date(t.match_time || t.timestamp || 0).getTime();
+              return matchTs >= windowStart && matchTs <= windowEnd && String(t.status).toUpperCase() === "MATCHED";
+            });
+
+            if (matched.length > 0) {
+              const filledShares = matched.reduce((acc, t) => acc + Number(t.size ?? 0), 0);
+              const txHash = matched.find((t) => t.transaction_hash)?.transaction_hash ?? null;
+              await prisma.liveOrder.update({
+                where: { id: stuck.id },
+                data: {
+                  status: "open",
+                  orderState: "matched",
+                  shares: filledShares || stuck.shares,
+                  orderId: matched[0]?.taker_order_id || null,
+                  transactionHash: txHash,
+                  filledAt: new Date(matched[0]?.match_time || stuck.createdAt),
+                  error: null,
+                },
+              });
+              console.log(`LiveOrder ${stuck.id}: verified fill in trade history -> open (${filledShares} shares)`);
+            } else {
+              await prisma.liveOrder.update({
+                where: { id: stuck.id },
+                data: { status: "not_filled", error: "stale submission without orderId verified 0 fills on CLOB" },
+              });
+              console.log(`LiveOrder ${stuck.id}: verified 0 fills in trade history -> not_filled`);
+            }
+          }
+        } catch (itemErr) {
+          console.warn(`LiveOrder ${stuck.id}: reconciliation check skipped: ${(itemErr as Error).message}`);
+        }
       }
     }
   } catch (e) {
