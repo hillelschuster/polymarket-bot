@@ -148,8 +148,30 @@ export async function executeWalletCopyOrder(params: {
   console.log(`LiveOrder ${lo.id}: ${status}${result.error ? ` — ${result.error}` : ""}`);
 }
 
-/** Mark held wallet-copy positions resolved once Gamma reports a binary payout. */
+/** Mark held wallet-copy positions resolved once Gamma reports a binary payout, and reconcile stuck orders. */
 export async function reconcileLiveOrders(): Promise<void> {
+  // 1. Auto-unblock stale "unknown" or "submitted" orders older than 2 minutes without orderId
+  try {
+    const stuckOrders = await prisma.liveOrder.findMany({
+      where: {
+        status: { in: ["unknown", "submitted"] },
+        createdAt: { lt: new Date(Date.now() - 2 * 60 * 1000) },
+      },
+    });
+    for (const stuck of stuckOrders) {
+      if (!stuck.orderId) {
+        await prisma.liveOrder.update({
+          where: { id: stuck.id },
+          data: { status: "not_filled", error: "stale submission without orderId auto-unblocked" },
+        });
+        console.log(`LiveOrder ${stuck.id}: auto-unblocked stale ${stuck.status} -> not_filled`);
+      }
+    }
+  } catch (e) {
+    console.warn(`reconcileLiveOrders: stuck order check failed: ${(e as Error).message}`);
+  }
+
+  // 2. Reconcile resolved open orders
   const openOrders = await prisma.liveOrder.findMany({
     where: { status: "open" },
     select: {

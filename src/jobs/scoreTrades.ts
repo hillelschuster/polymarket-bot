@@ -439,17 +439,21 @@ export async function runScoreTrades(): Promise<void> {
       if (!liveQuote) {
         console.log(`  LIVE SKIP: no executable quote at scaled $${liveCashBudget.toFixed(2)}`);
       } else {
-        const { executeWalletCopyOrder } = await import("../lib/liveExecution.js");
-        await executeWalletCopyOrder({
-          tokenId: ot.tokenId!,
-          cashBudget: liveQuote.cashCost,
-          allInPrice: liveQuote.allInPrice,
-          shares: liveQuote.shares,
-          decisionJournalId: dj.id,
-          walletAddress: ot.walletAddress,
-          marketId: ot.marketId,
-          slug: ot.slug ?? null,
-        });
+        try {
+          const { executeWalletCopyOrder } = await import("../lib/liveExecution.js");
+          await executeWalletCopyOrder({
+            tokenId: ot.tokenId!,
+            cashBudget: liveQuote.cashCost,
+            allInPrice: liveQuote.allInPrice,
+            shares: liveQuote.shares,
+            decisionJournalId: dj.id,
+            walletAddress: ot.walletAddress,
+            marketId: ot.marketId,
+            slug: ot.slug ?? null,
+          });
+        } catch (err) {
+          console.warn(`  LIVE ORDER FAILED (paper preserved): ${(err as Error).message}`);
+        }
       }
     }
 
