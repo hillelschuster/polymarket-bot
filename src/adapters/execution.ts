@@ -57,10 +57,12 @@ export interface BasketExecutionResult {
 let client: ClobClient | null = null;
 
 function asOrderResponse(value: unknown): OrderResponse {
-  const raw = (value ?? {}) as Partial<OrderResponse> & { error?: string };
+  const raw = (value ?? {}) as Partial<OrderResponse> & { error?: unknown };
+  const err = raw.errorMsg ?? raw.error;
+  const errorMsg = typeof err === "object" && err !== null ? JSON.stringify(err) : String(err ?? "");
   return {
     success: raw.success === true,
-    errorMsg: String(raw.errorMsg ?? raw.error ?? ""),
+    errorMsg,
     orderID: String(raw.orderID ?? ""),
     transactionsHashes: Array.isArray(raw.transactionsHashes) ? raw.transactionsHashes.map(String) : [],
     tradeIDs: Array.isArray(raw.tradeIDs) ? raw.tradeIDs.map(String) : [],
@@ -108,8 +110,8 @@ function immediateState(response: OrderResponse): LegSettlement {
   if ((response.tradeIDs?.length ?? 0) > 0) return "matched";
   const status = response.status.toLowerCase();
   if (status === "matched") return "matched";
-  if (["cancelled", "canceled", "failed", "rejected"].includes(status)) return "failed";
-  if (["delayed", "unmatched", "live", "pending"].includes(status)) return "pending";
+  if (["cancelled", "canceled", "failed", "rejected", "unmatched"].includes(status)) return "failed";
+  if (["delayed", "live", "pending"].includes(status)) return "pending";
   return response.errorMsg ? "failed" : "unknown";
 }
 
@@ -128,50 +130,29 @@ export async function inspectOrderResponse(response: OrderResponse): Promise<Leg
 
   const trades = await tradesFor(response);
   if (trades.some((trade) => trade.status.toUpperCase() === "FAILED")) return "failed";
-  if (trades.length && trades.every((trade) => trade.status.toUpperCase() === "CONFIRMED" || Boolean(trade.transaction_hash))) {
-    return "confirmed";
-  }
-  if (trades.some((trade) => ["MATCHED", "MINED", "RETRYING"].includes(trade.status.toUpperCase()))) {
-    return "matched";
-  }
-
-  if (response.orderID) {
-    try {
-      const order = await getTradingClient().getOrder(response.orderID);
-      const original = Number(order.original_size ?? 0);
-      const matched = Number(order.size_matched ?? 0);
-      const status = String(order.status ?? "").toLowerCase();
-      if (original > 0 && matched >= original - 1e-8) return "matched";
-      if (["cancelled", "canceled", "failed", "rejected"].includes(status)) return "failed";
-      if (status) return "pending";
-    } catch {
-      // The order endpoint can lag the placement response.
-    }
-  }
+  if (trades.length && trades.every((trade) => trade.status.toUpperCase() === "MATCHED")) return "matched";
   return immediate;
 }
 
-async function settleQuick(response: OrderResponse, maxMs = 700): Promise<LegSettlement> {
-  let state = immediateState(response);
-  if (state === "failed" || state === "confirmed" || state === "matched") return state;
-  const deadline = Date.now() + maxMs;
-  do {
+async function settleQuick(response: OrderResponse, budgetMs = 1_500): Promise<LegSettlement> {
+  const start = Date.now();
+  let state = await inspectOrderResponse(response);
+  while (state === "pending" && Date.now() - start < budgetMs) {
+    await new Promise((r) => setTimeout(r, 200));
     state = await inspectOrderResponse(response);
-    if (state === "failed" || state === "confirmed" || state === "matched") return state;
-    await new Promise((resolve) => setTimeout(resolve, 100));
-  } while (Date.now() < deadline);
+  }
   return state;
 }
 
-function held(state: LegSettlement): boolean {
-  return state === "matched" || state === "confirmed";
-}
-
 const TICKS = new Set(["0.1", "0.01", "0.005", "0.0025", "0.001", "0.0001"]);
-function orderOptions(tickSize?: string, negRisk?: boolean): Partial<CreateOrderOptions> | undefined {
+
+function orderOptions(tickSize?: string | number, negRisk?: boolean): Partial<CreateOrderOptions> | undefined {
   const options: Partial<CreateOrderOptions> = {};
-  if (tickSize && TICKS.has(tickSize)) options.tickSize = tickSize as TickSize;
-  if (negRisk != null) options.negRisk = negRisk;
+  if (tickSize != null) {
+    const str = String(tickSize);
+    if (TICKS.has(str)) options.tickSize = str as TickSize;
+  }
+  if (negRisk != null) options.negRisk = Boolean(negRisk);
   return Object.keys(options).length ? options : undefined;
 }
 
@@ -234,6 +215,10 @@ async function liveFeeModel(trading: ClobClient, tokenId: string): Promise<FeeMo
   return { rateBps, exponent };
 }
 
+function held(state: LegSettlement): boolean {
+  return state === "matched" || state === "confirmed";
+}
+
 export interface FokBuyResult {
   status: "filled" | "not_filled" | "unknown";
   state?: LegSettlement;
@@ -242,20 +227,22 @@ export interface FokBuyResult {
   error?: string;
 }
 
-/** One exact-share FOK buy. Any ambiguous result is fail-closed as unknown. */
+/** One exact-share FOK buy. Differentiates pre-posting errors from submission errors. */
 export async function executeFokBuy(input: {
   tokenId: string;
   shares: number;
   maxCashCost: number;
   maxAllInPrice: number;
 }): Promise<FokBuyResult> {
+  let signed;
+  let prepared: PreparedFokBuy | null = null;
   try {
     const trading = getTradingClient();
     const [rawBook, fee] = await Promise.all([
       trading.getOrderBook(input.tokenId),
       liveFeeModel(trading, input.tokenId),
     ]);
-    const prepared = prepareFokBuyOrder({
+    prepared = prepareFokBuyOrder({
       tokenId: input.tokenId,
       book: toBook(rawBook),
       fee,
@@ -265,7 +252,7 @@ export async function executeFokBuy(input: {
     });
     if (!prepared) return { status: "not_filled", error: "fresh CLOB quote exceeds approved limits" };
 
-    const signed = await trading.createOrder(
+    signed = await trading.createOrder(
       {
         tokenID: prepared.leg.tokenId,
         price: prepared.leg.limitPrice,
@@ -274,15 +261,26 @@ export async function executeFokBuy(input: {
       },
       orderOptions(prepared.leg.tickSize, prepared.leg.negRisk),
     );
+  } catch (prepError) {
+    return {
+      status: "not_filled",
+      prepared: prepared ?? undefined,
+      error: `Pre-submission error: ${prepError instanceof Error ? prepError.message : String(prepError)}`,
+    };
+  }
+
+  try {
+    const trading = getTradingClient();
     const response = asOrderResponse(await trading.postOrder(signed, OrderType.FOK, false, true));
     const state = await settleQuick(response, 1_500);
     if (held(state)) return { status: "filled", state, response, prepared };
     if (state === "failed") return { status: "not_filled", state, response, prepared };
     return { status: "unknown", state, response, prepared, error: `FOK order state ${state}` };
-  } catch (error) {
+  } catch (postError) {
     return {
       status: "unknown",
-      error: error instanceof Error ? error.message : String(error),
+      prepared,
+      error: `Post-submission error: ${postError instanceof Error ? postError.message : String(postError)}`,
     };
   }
 }

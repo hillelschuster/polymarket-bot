@@ -78,7 +78,8 @@ export async function executeWalletCopyOrder(params: {
     await trading.updateBalanceAllowance({ asset_type: AssetType.COLLATERAL });
     const collateral = await trading.getBalanceAllowance({ asset_type: AssetType.COLLATERAL });
     const balanceUsd = atomicUsd(collateral.balance);
-    const allowanceUsd = Math.max(...Object.values(collateral.allowances ?? {}).map(atomicUsd), 0);
+    const allowances = Object.values(collateral.allowances ?? {}).map(atomicUsd);
+    const allowanceUsd = allowances.length > 0 ? Math.min(...allowances) : 0;
     if (!Number.isFinite(balanceUsd) || balanceUsd + 0.005 < cashBudget || allowanceUsd + 0.005 < cashBudget) {
       await prisma.liveOrder.create({
         data: {
@@ -133,6 +134,7 @@ export async function executeWalletCopyOrder(params: {
     where: { id: lo.id },
     data: {
       status,
+      shares: result.prepared?.leg.shares ?? lo.shares,
       orderState: result.state ?? null,
       quoteCashCost: quote?.cashCost,
       quoteAllInPrice: quote?.allInPrice,

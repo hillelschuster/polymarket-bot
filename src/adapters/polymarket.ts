@@ -148,7 +148,8 @@ export async function getOrderBook(tokenId: string): Promise<OrderBook> {
 }
 
 export async function getFeeRateBps(tokenId: string): Promise<number> {
-  const raw = await fetchJson<{ base_fee: number | string }>(`${CLOB_API}/fee-rate/${encodeURIComponent(tokenId)}`);
+  const qs = new URLSearchParams({ token_id: tokenId });
+  const raw = await fetchJson<{ base_fee: number | string }>(`${CLOB_API}/fee-rate?${qs}`);
   const rate = Number(raw.base_fee);
   if (!Number.isFinite(rate) || rate < 0) throw new Error(`Invalid fee rate for token ${tokenId}`);
   return rate;
