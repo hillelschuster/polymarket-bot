@@ -2,26 +2,26 @@ import { describe, expect, it } from "vitest";
 import { liveCashBudgetForPaper, liveLimitReason } from "../src/lib/liveLimits.js";
 
 const limits = {
-  maxOpenPositions: 10,
+  maxOpenPositions: 15,
   maxPositionUsd: 10,
-  maxExposureUsd: 100,
+  maxExposureUsd: 150,
 };
 
 describe("live order limits", () => {
   it("allows a position within all configured limits", () => {
-    expect(liveLimitReason({ openPositions: 9, exposureUsd: 90, cashBudget: 10 }, limits)).toBeNull();
+    expect(liveLimitReason({ openPositions: 14, exposureUsd: 140, cashBudget: 10 }, limits)).toBeNull();
   });
 
   it("blocks a position above the requested per-position size", () => {
     expect(liveLimitReason({ openPositions: 0, exposureUsd: 0, cashBudget: 10.01 }, limits)).toBe("position-size-cap");
   });
 
-  it("blocks the eleventh open position", () => {
-    expect(liveLimitReason({ openPositions: 10, exposureUsd: 90, cashBudget: 10 }, limits)).toBe("open-position-cap");
+  it("blocks the sixteenth open position", () => {
+    expect(liveLimitReason({ openPositions: 15, exposureUsd: 140, cashBudget: 10 }, limits)).toBe("open-position-cap");
   });
 
   it("blocks exposure above the bankroll allocation", () => {
-    expect(liveLimitReason({ openPositions: 9, exposureUsd: 95, cashBudget: 10 }, limits)).toBe("exposure-cap");
+    expect(liveLimitReason({ openPositions: 14, exposureUsd: 145, cashBudget: 10 }, limits)).toBe("exposure-cap");
   });
 
   it("scales the paper position proportionally to a $10 live maximum", () => {
