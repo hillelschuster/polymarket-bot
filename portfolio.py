@@ -36,10 +36,10 @@ class PortfolioManager:
         if open_exposure >= max_allowable_exposure:
             return False, f"Portfolio exposure ${open_exposure:.2f} exceeds limit ${max_allowable_exposure:.2f}", 0.0
 
-        # 3. Check Daily Loss Circuit Breaker via clean DB helper
+        # 3. Catastrophic Drawdown Protection (50% bankroll stop only; does not freeze on normal variance)
         pnl_24h = self.db.get_24h_realized_pnl()
         if pnl_24h <= -self.config.daily_max_loss_usd:
-            return False, f"Daily circuit breaker active! (24h Realized PnL: ${pnl_24h:+.2f} <= -${self.config.daily_max_loss_usd:.2f})", 0.0
+            return False, f"Catastrophic circuit breaker active! (24h Realized PnL: ${pnl_24h:+.2f} <= -${self.config.daily_max_loss_usd:.2f})", 0.0
 
         # 4. Calibrated Sizing Allocation
         if strategy_lane == "TENNIS_ATP_ITF":

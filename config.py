@@ -18,14 +18,14 @@ class EnhancedConfig:
     # 1. Trading Mode & Bankroll
     trading_mode: str = os.getenv("MODE", "paper").upper()  # "PAPER" or "LIVE"
     bankroll_usd: float = float(os.getenv("BANKROLL_USD", "500.00"))
-    daily_max_loss_usd: float = float(os.getenv("DAILY_MAX_LOSS_USD", "35.00"))  # 7% hard stop
+    daily_max_loss_usd: float = float(os.getenv("DAILY_MAX_LOSS_USD", "250.00"))  # 50% catastrophic stop only; no early freeze
     max_open_positions: int = int(os.getenv("MAX_OPEN_POSITIONS", "15"))
     
-    # 2. Sizing Allocation per Trade ($500 Bankroll Baseline)
-    sizing_tennis_atp_itf_usd: float = float(os.getenv("SIZING_TENNIS_USD", "40.00"))   # 8% ($40 on $500)
-    sizing_baseball_mlb_usd: float = float(os.getenv("SIZING_BASEBALL_USD", "35.00"))   # 7% ($35 on $500)
-    sizing_soccer_2way_usd: float = float(os.getenv("SIZING_SOCCER_USD", "25.00"))      # 5% ($25 on $500)
-    sizing_crypto_close_usd: float = float(os.getenv("SIZING_CRYPTO_USD", "25.00"))     # 5% ($25 on $500)
+    # 2. Lean Sizing Allocation per Trade ($500 Bankroll Baseline)
+    sizing_tennis_atp_itf_usd: float = float(os.getenv("SIZING_TENNIS_USD", "20.00"))   # 4% ($20 on $500)
+    sizing_baseball_mlb_usd: float = float(os.getenv("SIZING_BASEBALL_USD", "15.00"))   # 3% ($15 on $500)
+    sizing_soccer_2way_usd: float = float(os.getenv("SIZING_SOCCER_USD", "15.00"))      # 3% ($15 on $500)
+    sizing_crypto_close_usd: float = float(os.getenv("SIZING_CRYPTO_USD", "15.00"))     # 3% ($15 on $500)
     min_order_notional_usd: float = 5.00
     
     # 3. Golden Alpha Execution Price Bands
@@ -48,15 +48,22 @@ class EnhancedConfig:
         "default": 0.05
     })
     
-    # 6. Complete Verified Sharp Whale Wallets (Top Tier-1 Sharps)
+    # 6. Complete Verified Sharp Whale Wallets (Top Verified Leaderboard Sharps)
     tracked_whale_wallets: Set[str] = field(default_factory=lambda: {
         "0x1610db79f753a80207e1d66716be9e91e627ae49".lower(),  # ATP / Challenger Ace (80.0% WR)
         "0x6d3c5bd13984b2de47c3a88ddc455309aab3d294".lower(),  # Tennis & MLB Specialist (+34% ROI, 82% WR)
         "0x4f29e103339919c4baaea2a731efc1b4737fa2ad".lower(),  # Top Leaderboard Sharp (80.6% WR over 31 trades)
         "0x224a89dbe0db0d6124b335eb2ba1216d00472479".lower(),  # MLB Ace Specialist
         "0x5268527977f700f9bf9b6d5cd843859e4e70135d".lower(),  # High-Volume Tennis Sharp (Jianu & Broom winner)
+        "0x1b47e9b128e6b671edebfb2cac23dd3efc40d814".lower(),  # Live Winner Copy (Buse ATP Winner)
+        "0x0353aaf82abbd3e69c00059df0a825bc198fc2ff".lower(),  # Live Winner Copy (Zheng ATP Winner)
+        "0x161a7f666ca49d592848cf415b42f49a84714103".lower(),  # Live Winner Copy (Orioles MLB Winner)
+        "0xbfdd2fb3f69cd098b395eb7390fe973a2158e70e".lower(),  # Live Winner Copy (Lehecka ATP Winner)
+        "0x772f8865fb93e6d0eb1d41dda3711589114a8145".lower(),  # ATP Tennis Sharpshooter
+        "0xcc500cbcc8b7cf5bd21975ebbea34f21b5644c82".lower(),  # Live Crypto TWAP Sharp
     })
     whale_cooldown_hours: float = 24.0
+    bot_db_path: str = os.getenv("BOT_DB_PATH", "/var/lib/trading-bots/polymarket-bot/polymarket-bot.sqlite")
     
     # 7. Polling Intervals
     scan_interval_seconds: float = 6.0

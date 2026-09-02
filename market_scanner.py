@@ -8,13 +8,15 @@ Enforces:
 4. Position Idempotency & Rate Limited HTTP.
 """
 
+import os
+import sqlite3
 import time
 import logging
 import collections
 import json
 import re
 import datetime
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Set
 from config import EnhancedConfig, load_config
 from db import EnhancedDB
 from execution import ExecutionEngine
@@ -73,6 +75,30 @@ class MarketScanner:
                 pass
         return True
 
+    def get_tracked_wallets(self) -> Set[str]:
+        """Returns the set of tracked wallets, combining static sharp list and live sync from polymarket-bot.sqlite."""
+        now = time.time()
+        if hasattr(self, "_cached_wallets") and (now - getattr(self, "_wallets_cached_at", 0)) < 60.0:
+            return self._cached_wallets
+
+        wallets = set(self.config.tracked_whale_wallets)
+        # Dynamically sync high-scoring leaderboard sharps from polymarket-bot.sqlite if accessible
+        if os.path.exists(self.config.bot_db_path):
+            try:
+                norm_path = self.config.bot_db_path.replace("\\", "/")
+                conn = sqlite3.connect(f"file:{norm_path}?mode=ro", uri=True)
+                cur = conn.execute("SELECT address FROM WalletProfile WHERE status='track' OR globalScore >= 35;")
+                for r in cur.fetchall():
+                    if r[0]:
+                        wallets.add(r[0].lower())
+                conn.close()
+            except Exception as e:
+                logger.debug(f"Could not read bot DB for dynamic wallets: {e}")
+
+        self._cached_wallets = wallets
+        self._wallets_cached_at = now
+        return wallets
+
     def _has_existing_open_position(self, token_id: str, market_slug: str) -> bool:
         open_positions = self.db.get_open_positions()
         return any(p["token_id"] == token_id or p["market_slug"] == market_slug for p in open_positions)
@@ -90,6 +116,8 @@ class MarketScanner:
                 return
 
             now = time.time()
+            tracked_wallets = self.get_tracked_wallets()
+
             for t in trades:
                 tx_id = str(t.get("transactionHash") or t.get("id") or "")
                 if not tx_id or tx_id in self.processed_txs:
@@ -112,8 +140,8 @@ class MarketScanner:
                 if not self._is_target_domain(slug, title) or not self._is_current_or_future_date(slug):
                     continue
 
-                # STRICT REQUIREMENT: Wallet must be a verified tracked sharp specialist
-                if wallet not in self.config.tracked_whale_wallets:
+                # STRICT REQUIREMENT: Wallet must be a verified tracked sharp specialist (static or dynamic leaderboard)
+                if wallet not in tracked_wallets:
                     continue
 
                 # WHALE COOLDOWN GATE: Check if this whale suffered a recent loss (24h tilt/slump shield)

@@ -99,7 +99,7 @@ class TestPolymarketEnhanced(unittest.TestCase):
     def test_portfolio_limits(self):
         can_trade, reason, budget = self.portfolio.can_open_position("TENNIS_ATP_ITF")
         self.assertTrue(can_trade)
-        self.assertEqual(budget, 40.0)
+        self.assertEqual(budget, 20.0)
 
     def test_whale_cooldown_filter(self):
         whale = "0x1610db79f753a80207e1d66716be9e91e627ae49"
@@ -119,12 +119,12 @@ class TestPolymarketEnhanced(unittest.TestCase):
             "trading_mode": "PAPER",
             "entry_timestamp": time.time() - 3600,
             "shares": 50.0,
-            "cash_invested_usd": 40.0,
+            "cash_invested_usd": 20.0,
             "entry_vwap": 0.65,
-            "entry_fee_usd": 0.70,
+            "entry_fee_usd": 0.35,
             "all_in_entry_price": 0.66,
             "current_price": 0.0,
-            "realized_pnl_usd": -40.0,
+            "realized_pnl_usd": -20.0,
             "status": "RESOLVED",
             "resolution_outcome": "LOSS",
             "closed_timestamp": time.time() - 1800,  # 30 mins ago
@@ -141,14 +141,17 @@ class TestPolymarketEnhanced(unittest.TestCase):
         on_cd_short, _ = self.db.is_whale_on_cooldown(whale, cooldown_hours=0.1)
         self.assertFalse(on_cd_short)
 
-    def test_pruned_whale_whitelist(self):
-        # Whitelist should contain the 5 Tier-1 sharps
-        self.assertEqual(len(self.config.tracked_whale_wallets), 5)
+    def test_expanded_whale_whitelist(self):
+        # Whitelist should contain all key leaderboard sharps
+        self.assertGreaterEqual(len(self.config.tracked_whale_wallets), 10)
         self.assertIn("0x1610db79f753a80207e1d66716be9e91e627ae49".lower(), self.config.tracked_whale_wallets)
         self.assertIn("0x6d3c5bd13984b2de47c3a88ddc455309aab3d294".lower(), self.config.tracked_whale_wallets)
         self.assertIn("0x4f29e103339919c4baaea2a731efc1b4737fa2ad".lower(), self.config.tracked_whale_wallets)
         self.assertIn("0x224a89dbe0db0d6124b335eb2ba1216d00472479".lower(), self.config.tracked_whale_wallets)
         self.assertIn("0x5268527977f700f9bf9b6d5cd843859e4e70135d".lower(), self.config.tracked_whale_wallets)
+        self.assertIn("0x1b47e9b128e6b671edebfb2cac23dd3efc40d814".lower(), self.config.tracked_whale_wallets)
+        self.assertIn("0x0353aaf82abbd3e69c00059df0a825bc198fc2ff".lower(), self.config.tracked_whale_wallets)
+        self.assertIn("0x161a7f666ca49d592848cf415b42f49a84714103".lower(), self.config.tracked_whale_wallets)
 
 if __name__ == "__main__":
     unittest.main()
