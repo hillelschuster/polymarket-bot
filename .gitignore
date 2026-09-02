@@ -1,0 +1,7 @@
+﻿__pycache__/
+*.pyc
+.env
+enhanced_trades.db
+enhanced_trades.db-shm
+enhanced_trades.db-wal
+*.log
