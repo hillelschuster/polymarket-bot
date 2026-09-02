@@ -18,7 +18,7 @@ class EnhancedConfig:
     # 1. Trading Mode & Bankroll
     trading_mode: str = os.getenv("MODE", "paper").upper()  # "PAPER" or "LIVE"
     bankroll_usd: float = float(os.getenv("BANKROLL_USD", "500.00"))
-    daily_max_loss_usd: float = float(os.getenv("DAILY_MAX_LOSS_USD", "250.00"))  # 50% catastrophic stop only; no early freeze
+    daily_max_loss_usd: float = 250.00  # 50% catastrophic stop only; no early freeze
     max_open_positions: int = int(os.getenv("MAX_OPEN_POSITIONS", "15"))
     
     # 2. Lean Sizing Allocation per Trade ($500 Bankroll Baseline)
