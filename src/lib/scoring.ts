@@ -152,6 +152,24 @@ export function categoryFromSlug(slug?: string | null): string | null {
 }
 
 /**
+ * Detect baseball markets (MLB, KBO, NPB, etc.) from slug or market question.
+ * Used to exclude baseball from live real-money execution while preserving
+ * paper tracking for longitudinal evaluation.
+ */
+export function isBaseballMarket(slug?: string | null, question?: string | null): boolean {
+  if (slug) {
+    const s = slug.toLowerCase();
+    if (s.startsWith("mlb-") || s.startsWith("kbo-") || s.startsWith("npb-")) return true;
+    if (s.includes("baseball") || s.includes("mlb")) return true;
+  }
+  if (question) {
+    const q = question.toLowerCase();
+    if (q.includes("baseball") || q.includes("mlb") || q.includes("kbo")) return true;
+  }
+  return false;
+}
+
+/**
  * Category-aware favorite gate thresholds. Research basis:
  * - Politics: Le (2026) 292M trades → 13-18% underconfidence → wider gate captures more edge
  * - Sports/Crypto: near-efficient at short horizons → tighter gate, only strong favorites

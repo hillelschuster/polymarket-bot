@@ -364,3 +364,25 @@ These are not substitutes for the missing live wiring:
 **No live launch is ready under the requested constraints.**
 
 The leanest truthful answer is not a parameter tweak. The requested live strategy requires missing execution wiring and live-account controls. The repository can continue running its existing paper loop unchanged while those requirements are addressed in a separate, explicitly reviewed change.
+
+---
+
+## Live Strategy Policy Amendment: Baseball De-listing (2026-09-03)
+
+### Context & Empirical Trigger
+Across live trading on real capital, baseball (MLB) produced 0 wins and 3 losses (0.0% win rate, -$25.29 realized PnL), alongside 1 postponed KBO order ($9.82 capital frozen). This turned a profitable non-baseball live ledger (+$10.64, 8W/1L across Tennis, Soccer, and Politics) into a net portfolio loss (-$14.65).
+
+Cross-bot verification confirmed consistent negative performance:
+- `polymarket-bot` (Paper, 0.73-0.75 bucket): -$22.87 on $N=25$ trades (68.0% win rate vs 74.0% break-even threshold).
+- `polymarket-alpha-vault`: -$255.75 on $N=13$ trades.
+- `polymarket-enhanced`: -$40.45 on $N=8$ resolved trades.
+
+### Root Causes
+1. **Payoff Asymmetry & Negative EV**: In high-parity sports like baseball, entry prices in the 0.73–0.75 band require a 74% win rate to break even. Empirically, paper baseball win rates were 68.0%, generating negative mathematical expectation (-6.0% EV per dollar risked).
+2. **In-Play Market Maker Adverse Selection**: Wallets copied (e.g. `wr0ngw4yb3tt0r`) actively trade both sides in-play. Gating on favorites isolates and copies the small losing hedge leg with full position size while omitting the winning underdog leg.
+3. **Weather / Schedule Delays**: Rainouts freeze capital under the `LIVE_MAX_OPEN_POSITIONS=15` cap, blocking higher-velocity trades.
+
+### Operational Policy
+- **Live Real-Money Execution**: **Baseball is strictly excluded** (`isBaseballMarket` guard in `scoreTrades.ts` and `liveExecution.ts`). No real-money orders will be placed on MLB, KBO, or NPB markets.
+- **Paper Simulation Engine**: **Baseball remains active in paper mode**. Simulated trades will continue to be observed, marked, and resolved in the database to longitudinally assess whether structural edge ever emerges across larger sample sizes ($N > 100$).
+- **Enhanced Bot**: The baseball evaluator branch is disabled in `market_scanner.py`, focusing the engine strictly on Tennis.

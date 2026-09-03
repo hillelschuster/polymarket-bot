@@ -4,6 +4,7 @@ import { prisma } from "./db.js";
 import { getMarketBySlug } from "../adapters/polymarket.js";
 import { assertLiveTradingConfigured, config } from "./config.js";
 import { liveLimitReason } from "./liveLimits.js";
+import { isBaseballMarket } from "./scoring.js";
 
 function atomicUsd(value: string | number): number {
   if (String(value).toLowerCase() === "unlimited") return Infinity;
@@ -27,6 +28,12 @@ export async function executeWalletCopyOrder(params: {
   slug: string | null;
 }): Promise<void> {
   const { tokenId, cashBudget, allInPrice, shares, decisionJournalId, walletAddress, marketId, slug } = params;
+
+  // Hard gate: baseball is disabled for live execution (negative EV, market-maker adverse selection).
+  if (isBaseballMarket(slug, null)) {
+    console.log(`executeWalletCopyOrder: rejected baseball slug ${slug} (live baseball disabled)`);
+    return;
+  }
 
   // Do not create a durable intent if the live switch/credentials are invalid.
   assertLiveTradingConfigured();

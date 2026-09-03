@@ -38,4 +38,33 @@ describe("live execution gate", () => {
     expect(typeof runReviewOutcomes).toBe("function");
   }, 15_000);
 
+  it("detects baseball markets accurately", async () => {
+    const { isBaseballMarket } = await import("../src/lib/scoring.js");
+    expect(isBaseballMarket("mlb-sd-cin-2026-09-02", null)).toBe(true);
+    expect(isBaseballMarket("kbo-ssg-kia-2026-08-28", null)).toBe(true);
+    expect(isBaseballMarket("npb-hanshin-giants-2026-09-01", null)).toBe(true);
+    expect(isBaseballMarket(null, "Will the New York Yankees win today's baseball game?")).toBe(true);
+    expect(isBaseballMarket(null, "MLB: Baltimore Orioles vs. Colorado Rockies")).toBe(true);
+
+    // Non-baseball must not be flagged
+    expect(isBaseballMarket("atp-mena-wehnelt-2026-08-26", "Augsburg: Facundo Mena vs Kai Wehnelt")).toBe(false);
+    expect(isBaseballMarket("wta-bartunk-maria-2026-09-03", "US Open WTA: Nikola Bartunkova vs Tatjana Maria")).toBe(false);
+    expect(isBaseballMarket("ucl-cel1-sba-2026-08-26-sba", "Will ŠK Slovan Bratislava win on 2026-08-26?")).toBe(false);
+    expect(isBaseballMarket("will-bitcoin-dip-to-70k-in-september-2026", null)).toBe(false);
+  });
+
+  it("executeWalletCopyOrder rejects baseball without throwing or calling CLOB", async () => {
+    const { executeWalletCopyOrder } = await import("../src/lib/liveExecution.js");
+    // Should exit early and cleanly
+    await expect(executeWalletCopyOrder({
+      tokenId: "mock-token",
+      cashBudget: 10,
+      allInPrice: 0.74,
+      shares: 13,
+      decisionJournalId: "mock-dj",
+      walletAddress: "0x123",
+      marketId: "mock-market",
+      slug: "mlb-sd-cin-2026-09-02",
+    })).resolves.toBeUndefined();
+  });
 });

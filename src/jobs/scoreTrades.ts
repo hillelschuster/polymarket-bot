@@ -4,7 +4,7 @@
 // Gamma midpoints are NEVER used as entry. If the orderbook is unavailable,
 // the trade is skipped. This makes every future observation trustworthy.
 import { prisma } from "../lib/db.js";
-import { scoreTradeByMarket, DEFAULT_RULES, walletCopySkipReason, categoryFromSlug, getFavoriteGate, type RuleSetValues } from "../lib/scoring.js";
+import { scoreTradeByMarket, DEFAULT_RULES, walletCopySkipReason, categoryFromSlug, getFavoriteGate, isBaseballMarket, type RuleSetValues } from "../lib/scoring.js";
 import { createPaperTrade } from "../lib/paper.js";
 import { config, realTradingEnabled } from "../lib/config.js";
 import { liveCashBudgetForPaper } from "../lib/liveLimits.js";
@@ -433,7 +433,12 @@ export async function runScoreTrades(): Promise<void> {
     });
 
     // Live execution is opt-in and uses the exact approved executable quote.
-    if (realTradingEnabled) {
+    // Baseball is strictly excluded from live execution (negative EV, market maker adverse selection)
+    // while preserving paper tracking for longitudinal evaluation.
+    const isBaseball = isBaseballMarket(ot.slug, ot.marketQuestion);
+    if (isBaseball && realTradingEnabled) {
+      console.log(`  LIVE SKIP: baseball excluded from real execution (paper tracking preserved) for ${ot.slug ?? ot.marketId}`);
+    } else if (realTradingEnabled) {
       const liveCashBudget = liveCashBudgetForPaper(cashBudget, config.LIVE_MAX_POSITION_USD);
       const liveQuote = await getExecutableBuyQuote(ot.tokenId!, liveCashBudget);
       if (!liveQuote) {
